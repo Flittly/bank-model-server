@@ -9,7 +9,46 @@ import config
 SCHEMA_SQL_PATH = Path(__file__).resolve().parent.parent / "database_schema.sql"
 
 
-MIGRATION_SQL = None
+MIGRATION_SQL = """
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_name = 'bank_risk_results'
+          AND column_name = 'task_id'
+          AND data_type <> 'character varying'
+    ) THEN
+        ALTER TABLE bank_risk_results DROP CONSTRAINT IF EXISTS bank_risk_results_task_id_fkey;
+        ALTER TABLE bank_risk_results ALTER COLUMN task_id TYPE VARCHAR(100) USING task_id::text;
+        UPDATE bank_risk_results brr
+        SET task_id = t.task_id
+        FROM tasks t
+        WHERE brr.task_id = t.id::text;
+        ALTER TABLE bank_risk_results
+            ADD CONSTRAINT bank_risk_results_task_id_fkey
+            FOREIGN KEY (task_id) REFERENCES tasks(task_id) ON DELETE CASCADE;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_name = 'bank_risk_results'
+          AND column_name = 'section_id'
+          AND data_type <> 'character varying'
+    ) THEN
+        ALTER TABLE bank_risk_results DROP CONSTRAINT IF EXISTS bank_risk_results_section_id_fkey;
+        ALTER TABLE bank_risk_results ALTER COLUMN section_id TYPE VARCHAR(100) USING section_id::text;
+        UPDATE bank_risk_results brr
+        SET section_id = cs.section_id
+        FROM cross_sections cs
+        WHERE brr.section_id = cs.id::text;
+        ALTER TABLE bank_risk_results
+            ADD CONSTRAINT bank_risk_results_section_id_fkey
+            FOREIGN KEY (section_id) REFERENCES cross_sections(section_id) ON DELETE CASCADE;
+    END IF;
+END $$;
+"""
 
 
 def _ensure_database_exists() -> None:
@@ -115,7 +154,7 @@ def reset_database():
             "basic_params",
             "tasks",
             "banks",
-            "correction_lines"
+            "correction_lines",
         ]
 
         for table in tables:

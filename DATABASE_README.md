@@ -207,8 +207,8 @@ CREATE TABLE IF NOT EXISTS tasks (
 | 字段名 | 类型 | 说明 | 约束 |
 |--------|------|------|------|
 | id | SERIAL | 主键 | PRIMARY KEY |
-| task_id | INTEGER | 外键 → tasks.id | NOT NULL |
-| section_id | INTEGER | 外键 → cross_sections.id | NOT NULL |
+| task_id | VARCHAR(100) | 外键 → tasks.task_id | NOT NULL |
+| section_id | VARCHAR(100) | 外键 → cross_sections.section_id | NOT NULL |
 | section_name | VARCHAR(100) | 断面名称 | - |
 | region_code | VARCHAR(50) | 区域代码 | - |
 | bank_id | VARCHAR(100) | 岸段ID | - |
@@ -224,8 +224,8 @@ CREATE TABLE IF NOT EXISTS tasks (
 - idx_bank_results_geom: geom (GIST)
 
 **外键关系**:
-- task_id → tasks(id) (ON DELETE CASCADE)
-- section_id → cross_sections(id) (ON DELETE CASCADE)
+- task_id → tasks(task_id) (ON DELETE CASCADE)
+- section_id → cross_sections(section_id) (ON DELETE CASCADE)
 
 ---
 

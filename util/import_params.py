@@ -16,6 +16,17 @@ import config
 from util import db_ops
 
 
+def normalize_timepoint(value: str) -> str:
+    text = str(value).strip()
+    if len(text) == 6 and text.isdigit():
+        return f"{text[:4]}-{text[4:6]}-01"
+    if len(text) == 8 and text.isdigit():
+        return f"{text[:4]}-{text[4:6]}-{text[6:8]}"
+    if len(text) == 7 and text[4] == "-":
+        return f"{text}-01"
+    return text
+
+
 def load_json_file(file_path: Path) -> dict:
     """加载 JSON 文件"""
     if not file_path.exists():
@@ -117,6 +128,7 @@ def import_parameters():
     # 定义默认的河段和时间点
     segments = ["Mzs"]
     timepoints = ["202304"]
+    comparison_timepoint = "201904"
 
     imported_count = 0
     skipped_count = 0
@@ -127,6 +139,11 @@ def import_parameters():
     for segment in segments:
         for timepoint in timepoints:
             for combo in param_combinations:
+                current_timepoint = normalize_timepoint(timepoint)
+                comparison_timepoint_normalized = normalize_timepoint(
+                    comparison_timepoint
+                )
+
                 # 生成唯一的 param_id
                 param_id = f"PARAM_{segment}_{timepoint}_{combo['water_qs']}_{combo['tidal_level']}"
                 param_name = (
@@ -146,7 +163,7 @@ def import_parameters():
                         param_id=param_id,
                         param_name=param_name,
                         segment=segment,
-                        current_timepoint=timepoint,
+                        current_timepoint=current_timepoint,
                         set_name=set_name,
                         water_qs=combo["water_qs"],
                         tidal_level=combo["tidal_level"],
@@ -165,7 +182,7 @@ def import_parameters():
                         hc=2.0,
                         protection_level="systemic",
                         control_level="strict",
-                        comparison_timepoint="201904",
+                        comparison_timepoint=comparison_timepoint_normalized,
                         risk_thresholds=risk_thresholds,
                         weights=weights,
                         other_params={
@@ -187,7 +204,7 @@ def import_parameters():
                 param_id=default_param_id,
                 param_name="默认参数模板",
                 segment="Mzs",
-                current_timepoint="202304",
+                current_timepoint=normalize_timepoint("202304"),
                 set_name="standard",
                 water_qs="10000",
                 tidal_level="zc",
@@ -201,7 +218,7 @@ def import_parameters():
                 hc=2.0,
                 protection_level="systemic",
                 control_level="strict",
-                comparison_timepoint="201904",
+                comparison_timepoint=normalize_timepoint("201904"),
                 risk_thresholds=risk_thresholds,
                 weights=weights,
                 other_params={"pq_data": pq_data, "is_default": True},

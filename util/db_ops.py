@@ -250,6 +250,9 @@ def update_task_status(
     run_started_at: Optional[str] = None,
     run_completed_at: Optional[str] = None,
     error_message: Optional[str] = None,
+    clear_run_started_at: bool = False,
+    clear_run_completed_at: bool = False,
+    clear_error_message: bool = False,
 ) -> bool:
     """
     Update task status and related fields
@@ -258,13 +261,19 @@ def update_task_status(
         set_clause_parts = ["status = %s"]
         values = [status]
 
-        if run_started_at is not None:
+        if clear_run_started_at:
+            set_clause_parts.append("run_started_at = NULL")
+        elif run_started_at is not None:
             set_clause_parts.append("run_started_at = %s")
             values.append(run_started_at)
-        if run_completed_at is not None:
+        if clear_run_completed_at:
+            set_clause_parts.append("run_completed_at = NULL")
+        elif run_completed_at is not None:
             set_clause_parts.append("run_completed_at = %s")
             values.append(run_completed_at)
-        if error_message is not None:
+        if clear_error_message:
+            set_clause_parts.append("error_message = NULL")
+        elif error_message is not None:
             set_clause_parts.append("error_message = %s")
             values.append(error_message)
 
@@ -280,6 +289,15 @@ def update_task_status(
             tuple(values),
         )
         return cursor.rowcount > 0
+
+
+def delete_risk_results(task_id: str) -> int:
+    """
+    Delete all persisted risk results for a task.
+    """
+    with db.get_db_cursor() as (conn, cursor):
+        cursor.execute("DELETE FROM bank_risk_results WHERE task_id = %s", (task_id,))
+        return cursor.rowcount
 
 
 # ========================================
@@ -697,8 +715,8 @@ def clear_task_data(task_id: str) -> Optional[Dict[str, int]]:
 
 
 def create_risk_result(
-    task_id: int,
-    section_id: int,
+    task_id: str,
+    section_id: str,
     section_name: str,
     region_code: str,
     bank_id: str,
@@ -768,6 +786,7 @@ def get_sections_by_task(task_id: str) -> List[Dict[str, Any]]:
 
 def get_bank_risk_results(
     task_id: Optional[str] = None,
+    section_id: Optional[str] = None,
     bank_id: Optional[str] = None,
     region_code: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
@@ -785,10 +804,11 @@ def get_bank_risk_results(
 
         conditions = []
         if task_id is not None:
-            task = get_task(task_id)
-            if task:
-                conditions.append("brr.task_id = %s")
-                params.append(task["id"])
+            conditions.append("brr.task_id = %s")
+            params.append(task_id)
+        if section_id is not None:
+            conditions.append("brr.section_id = %s")
+            params.append(section_id)
         if bank_id is not None:
             conditions.append("brr.bank_id = %s")
             params.append(bank_id)
@@ -805,9 +825,9 @@ def get_bank_risk_results(
         return cursor.fetchall()
 
 
-def get_bank_risk_result(result_id: int) -> Optional[Dict[str, Any]]:
+def get_bank_risk_result(section_id: str) -> Optional[Dict[str, Any]]:
     """
-    Get a single bank risk result by id
+    Get a single bank risk result by section_id
     """
     with db.get_db_cursor(dict_cursor=True) as (conn, cursor):
         cursor.execute(
@@ -816,9 +836,11 @@ def get_bank_risk_result(result_id: int) -> Optional[Dict[str, Any]]:
                 brr.*,
                 ST_AsGeoJSON(brr.geom)::jsonb as geometry
             FROM bank_risk_results brr
-            WHERE brr.id = %s
+            WHERE brr.section_id = %s
+            ORDER BY brr.run_time DESC, brr.id DESC
+            LIMIT 1
             """,
-            (result_id,),
+            (section_id,),
         )
         result = cursor.fetchone()
         return result if result else None

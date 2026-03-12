@@ -231,8 +231,8 @@ FOR EACH ROW EXECUTE FUNCTION update_cross_sections_updated_at();
 -- ========================================
 CREATE TABLE IF NOT EXISTS bank_risk_results (
     id SERIAL PRIMARY KEY,
-    task_id INTEGER NOT NULL,
-    section_id INTEGER NOT NULL,
+    task_id VARCHAR(100) NOT NULL,
+    section_id VARCHAR(100) NOT NULL,
     section_name VARCHAR(100),
     region_code VARCHAR(50),
     bank_id VARCHAR(100),
@@ -241,8 +241,8 @@ CREATE TABLE IF NOT EXISTS bank_risk_results (
     indicators JSONB,
     geom GEOMETRY(LineString, 4326),
     
-    FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
-    FOREIGN KEY (section_id) REFERENCES cross_sections(id) ON DELETE CASCADE
+    FOREIGN KEY (task_id) REFERENCES tasks(task_id) ON DELETE CASCADE,
+    FOREIGN KEY (section_id) REFERENCES cross_sections(section_id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_bank_results_section ON bank_risk_results(section_id);

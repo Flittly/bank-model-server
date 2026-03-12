@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 import config
 import util
 from . import controllers
-from .schemas import PredictRequest
+from .schemas import PredictRequest, TaskRunRequest
 
 api_router = APIRouter()
 
@@ -61,6 +61,36 @@ async def predict(request: PredictRequest) -> dict[str, Any]:
         raise HTTPException(status_code=504, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@api_router.post("/bank/tasks/{task_id}/run")
+async def run_task(task_id: str, request: TaskRunRequest) -> dict[str, Any]:
+    try:
+        return controllers.run_task(task_id, request.timeout_seconds)
+    except FileNotFoundError as exc:
+        raise handle_not_found(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@api_router.get("/bank/tasks/{task_id}/results")
+async def get_task_results(task_id: str) -> dict[str, Any]:
+    try:
+        return controllers.get_task_results(task_id)
+    except FileNotFoundError as exc:
+        raise handle_not_found(exc) from exc
+
+
+@api_router.get(f"{config.API_VERSION}/bank/results/{{result_id}}")
+async def get_bank_result(result_id: str) -> dict[str, Any]:
+    try:
+        return controllers.get_bank_result(result_id)
+    except FileNotFoundError as exc:
+        raise handle_not_found(exc) from exc
 
 
 @api_router.get(f"{config.API_MC_STATUS}")

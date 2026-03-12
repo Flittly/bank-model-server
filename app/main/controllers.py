@@ -7,6 +7,7 @@ import config
 import model
 import util
 from util import StorageMonitor
+from . import task_service
 
 
 def normalize_model_api(model_api: str) -> str:
@@ -235,3 +236,15 @@ def handle_model_runner(api: str, request_json: dict[str, Any]) -> dict[str, Any
     return (
         model.launcher.fetch_model_from_API(api).run(request_json).make_response() or {}
     )
+
+
+def run_task(task_id: str, timeout_seconds: int) -> dict[str, Any]:
+    return task_service.run_task(task_id, timeout_seconds)
+
+
+def get_task_results(task_id: str) -> dict[str, Any]:
+    return task_service.get_task_results(task_id)
+
+
+def get_bank_result(section_id: str) -> dict[str, Any]:
+    return task_service.get_bank_result(section_id)

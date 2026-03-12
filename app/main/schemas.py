@@ -9,3 +9,7 @@ class PredictRequest(BaseModel):
     )
     payload: dict[str, Any] = Field(default_factory=dict)
     timeout_seconds: int = Field(default=600, ge=1, le=3600)
+
+
+class TaskRunRequest(BaseModel):
+    timeout_seconds: int = Field(default=600, ge=1, le=3600)
