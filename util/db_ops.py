@@ -859,6 +859,7 @@ def create_hydrodynamic_point(
     tidal_level: str,
     x: float,
     y: float,
+    temp: bool = False,
 ) -> int:
     """
     Create a hydrodynamic point
@@ -867,14 +868,14 @@ def create_hydrodynamic_point(
         cursor.execute(
             """
             INSERT INTO hydrodynamic_points (
-                point_id, region_code, set_name, water_qs, tidal_level, x, y, geom
+                point_id, region_code, set_name, water_qs, tidal_level, temp, x, y, geom
             ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s,
                 ST_SetSRID(ST_MakePoint(%s, %s), 4326)
             )
             RETURNING id
             """,
-            (point_id, region_code, set_name, water_qs, tidal_level, x, y, x, y),
+            (point_id, region_code, set_name, water_qs, tidal_level, temp, x, y, x, y),
         )
         return cursor.fetchone()[0]
 
@@ -903,6 +904,7 @@ def get_hydrodynamic_points(
     set_name: Optional[str] = None,
     water_qs: Optional[str] = None,
     tidal_level: Optional[str] = None,
+    temp: Optional[bool] = None,
 ) -> List[Dict[str, Any]]:
     """
     Get hydrodynamic points with optional filters
@@ -929,6 +931,9 @@ def get_hydrodynamic_points(
         if tidal_level is not None:
             conditions.append("hp.tidal_level = %s")
             params.append(tidal_level)
+        if temp is not None:
+            conditions.append("hp.temp = %s")
+            params.append(temp)
 
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
@@ -937,6 +942,31 @@ def get_hydrodynamic_points(
 
         cursor.execute(query, tuple(params))
         return cursor.fetchall()
+
+
+def get_available_hydrodynamic_nodes(
+    region_code: str,
+    set_name: str,
+    tidal_level: str,
+) -> List[int]:
+    """
+    Get available non-temp hydrodynamic water_qs nodes for a given tidal level.
+    """
+    with db.get_db_cursor(dict_cursor=True) as (conn, cursor):
+        cursor.execute(
+            """
+            SELECT DISTINCT water_qs
+            FROM hydrodynamic_points
+            WHERE region_code = %s
+              AND set_name = %s
+              AND tidal_level = %s
+              AND temp = FALSE
+            ORDER BY water_qs::INTEGER
+            """,
+            (region_code, set_name, tidal_level),
+        )
+        rows = cursor.fetchall()
+        return [int(row["water_qs"]) for row in rows]
 
 
 def create_hydrodynamic_data(
@@ -1053,6 +1083,7 @@ def bulk_create_hydrodynamic_points(points: list) -> list:
                 tidal_level=p["tidal_level"],
                 x=p["x"],
                 y=p["y"],
+                temp=p.get("temp", False),
             )
             inserted_ids.append(point_id_db)
         except Exception:

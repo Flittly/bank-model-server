@@ -261,6 +261,7 @@ CREATE TABLE IF NOT EXISTS hydrodynamic_points (
     set_name VARCHAR(50) NOT NULL,
     water_qs VARCHAR(20) NOT NULL,
     tidal_level VARCHAR(20) NOT NULL,
+    temp BOOLEAN DEFAULT FALSE NOT NULL,
     
     -- 坐标数据
     x NUMERIC NOT NULL,
@@ -276,6 +277,7 @@ CREATE INDEX IF NOT EXISTS idx_hydro_points_region ON hydrodynamic_points(region
 CREATE INDEX IF NOT EXISTS idx_hydro_points_set ON hydrodynamic_points(set_name);
 CREATE INDEX IF NOT EXISTS idx_hydro_points_water ON hydrodynamic_points(water_qs);
 CREATE INDEX IF NOT EXISTS idx_hydro_points_tidal ON hydrodynamic_points(tidal_level);
+CREATE INDEX IF NOT EXISTS idx_hydro_points_temp ON hydrodynamic_points(temp);
 CREATE INDEX IF NOT EXISTS idx_hydro_points_geom ON hydrodynamic_points USING GIST(geom);
 
 CREATE OR REPLACE FUNCTION update_hydrodynamic_points_updated_at()

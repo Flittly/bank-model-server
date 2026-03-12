@@ -17,6 +17,19 @@ import config
 from util import db
 
 
+def get_temp_flag(item: Path) -> bool:
+    description_path = item / "description.json"
+    if not description_path.exists():
+        return False
+    try:
+        import json
+
+        with open(description_path, "r", encoding="utf-8") as f:
+            return bool(json.load(f).get("temp", False))
+    except Exception:
+        return False
+
+
 def parse_single_file_for_point(file_path: Path, point_key: tuple) -> dict:
     """
     只解析一个文件中特定坐标点的数据
@@ -114,6 +127,7 @@ def import_single_flow_optimized(
         print(f"\n处理: {dir_name}")
 
         item = hydro_path / dir_name
+        temp_flag = get_temp_flag(item)
         raw_dir = item / "raw"
         if not raw_dir.exists():
             print(f"  跳过: raw文件夹不存在")
@@ -154,6 +168,7 @@ def import_single_flow_optimized(
                     "set_name": set_name,
                     "water_qs": flow_level,
                     "tidal_level": dir_name[-2:],
+                    "temp": temp_flag,
                     "x": x,
                     "y": y,
                 }
@@ -173,8 +188,8 @@ def import_single_flow_optimized(
                     cursor.execute(
                         """
                         INSERT INTO hydrodynamic_points (
-                            point_id, region_code, set_name, water_qs, tidal_level, x, y, geom
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s,
+                            point_id, region_code, set_name, water_qs, tidal_level, temp, x, y, geom
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
                             ST_SetSRID(ST_MakePoint(%s, %s), 4326)
                         )
                         ON CONFLICT (point_id) DO NOTHING
@@ -186,6 +201,7 @@ def import_single_flow_optimized(
                             pr["set_name"],
                             pr["water_qs"],
                             pr["tidal_level"],
+                            pr["temp"],
                             pr["x"],
                             pr["y"],
                             pr["x"],

@@ -48,6 +48,12 @@ BEGIN
             FOREIGN KEY (section_id) REFERENCES cross_sections(section_id) ON DELETE CASCADE;
     END IF;
 END $$;
+
+ALTER TABLE hydrodynamic_points
+ADD COLUMN IF NOT EXISTS temp BOOLEAN DEFAULT FALSE NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_hydro_points_temp
+ON hydrodynamic_points(temp);
 """
 
 
