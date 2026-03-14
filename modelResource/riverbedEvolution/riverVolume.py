@@ -14,7 +14,7 @@ from PIL import Image
 from osgeo import gdal
 from osgeo import ogr
 from osgeo import osr
-
+from util.rustfs import resolve_resource_path
 
 def get_bound_coords(output_tif: str) -> dict:
     list_coords = {}
@@ -268,8 +268,8 @@ def compute_volume(depth, region_geometry, in_raster_path, output_path):
 
 @model.model_status_controller_sync
 def run_river_volume_mcr(mcr: model.ModelCaseReference):
-    
-    dem_path = os.path.join(config.DIR_RESOURCE, mcr.request_json['dem-id'])
+
+    dem_path = resolve_resource_path(mcr.request_json['dem-id'])
     depth = mcr.request_json['water-depth']
     region_geometry = mcr.request_json['region-geometry']
     output_path = os.path.join(mcr.directory, 'result')

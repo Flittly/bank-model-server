@@ -7,6 +7,8 @@ uvicorn>=0.24.0
 
 # Data validation
 pydantic>=2.5.0
+boto3>=1.34.0
+python-dotenv>=1.0.1
 
 # Scientific computing
 numpy>=1.26.0

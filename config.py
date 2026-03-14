@@ -1,8 +1,26 @@
 import os
 import weakref
 
-APP_PORT = 8088
-APP_DEBUG = True
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover
+
+    def load_dotenv(*args, **kwargs):
+        return False
+
+
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+APP_PORT = int(os.getenv("APP_PORT", "8088"))
+APP_DEBUG = _env_flag("APP_DEBUG", True)
 
 # API Version
 API_VERSION = "/v0"
@@ -65,11 +83,11 @@ API_MI_WATER_LEVEL_FLUCTUATION = API_VERSION + "/mi/water-level-fluctuation"
 API_EM_BSTEM = API_VERSION + "/em/bstem"
 
 # Database Configuration
-DB_HOST = "localhost"
-DB_PORT = "5432"
-DB_NAME = "bank_risk_db"
-DB_USER = "postgres"
-DB_PASSWORD = "123456"  # Please change this to your actual password
+DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_PORT = os.getenv("DB_PORT", "5432")
+DB_NAME = os.getenv("DB_NAME", "bank_risk_db")
+DB_USER = os.getenv("DB_USER", "postgres")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "123456")
 
 # Status Flag
 STATUS_UNLOCK = 0b1
@@ -85,6 +103,7 @@ DIR_MODEL_CASE = os.path.join(DIR_ROOT, "case")
 DIR_MODEL = os.path.join(DIR_ROOT, "model")
 DIR_TRIGGER_RESOURCE = os.path.join(DIR_ROOT, "modelResource")
 DIR_RESOURCE = os.path.join(DIR_ROOT, "resource")
+DIR_RESOURCE_CACHE = os.path.join(DIR_RESOURCE, "cache")
 DIR_STORAGE_LOG = os.path.join(DIR_ROOT, "resource", "storage", "log.txt")
 DIR_RESOURCE_SHP = os.path.join(DIR_ROOT, "resource", "shp")
 DIR_RESOURCE_ADF = os.path.join(DIR_ROOT, "resource", "adf")

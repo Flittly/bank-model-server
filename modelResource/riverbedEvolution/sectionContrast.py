@@ -12,6 +12,7 @@ import model
 import config
 import numpy as np
 from osgeo import gdal, osr
+from util.rustfs import resolve_resource_path
 
 # specific crs change process
 def transform_coordinates(coords, source_srs, target_srs):
@@ -237,8 +238,8 @@ def section_contrast(benchmark_path, refer_path, raster_path, section_geometry, 
 @model.model_status_controller_sync
 def run_section_contrast_mcr(mcr: model.ModelCaseReference):
     
-    bench_path = os.path.join(config.DIR_RESOURCE, mcr.request_json['bench-id'])
-    ref_path = os.path.join(config.DIR_RESOURCE, mcr.request_json['ref-id'])
+    bench_path = resolve_resource_path(mcr.request_json['bench-id'])
+    ref_path = resolve_resource_path(mcr.request_json['ref-id'])
     global_output_path = os.path.join(global_mcr.directory, 'result')
     section_geometry = mcr.request_json['section-geometry']
     output_path = os.path.join(mcr.directory, 'result')

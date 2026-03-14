@@ -16,6 +16,7 @@ from osgeo import osr
 from osgeo import gdal
 
 from model import ModelCaseReference as MCR
+from util.rustfs import resolve_tiff_path,resolve_resource_path
 
 
 def get_raster_projection(input: str) -> str:
@@ -373,19 +374,20 @@ def run_global_flush_mcr(mcr: MCR):
     
     # 解析并拼接 bench-id
     bench_time = str(mcr.request_json.get('bench-timepoint', mcr.request_json.get('bench-id', '202304'))).replace('-', '')
-    bench_year = bench_time[:4] if len(bench_time) >= 4 else '2023'
-    bench_rel_path = os.path.join('tiff', segment, bench_year, 'standard', bench_time, f"{bench_time}.tif")
-    bench_path = os.path.join(config.DIR_RESOURCE, bench_rel_path)
-    if not os.path.exists(bench_path):
-        bench_path = os.path.join(config.DIR_RESOURCE, mcr.request_json.get('bench-id', ''))
-        
-    # 解析并拼接 ref-id
+    bench_path = resolve_tiff_path(
+        mcr.request_json.get('bench-id'),
+        segment=segment,
+        timepoint=bench_time,
+        set_name='standard'
+    )
+
     ref_time = str(mcr.request_json.get('ref-timepoint', mcr.request_json.get('ref-id', '202304'))).replace('-', '')
-    ref_year = ref_time[:4] if len(ref_time) >= 4 else '2023'
-    ref_rel_path = os.path.join('tiff', segment, ref_year, 'standard', ref_time, f"{ref_time}.tif")
-    ref_path = os.path.join(config.DIR_RESOURCE, ref_rel_path)
-    if not os.path.exists(ref_path):
-        ref_path = os.path.join(config.DIR_RESOURCE, mcr.request_json.get('ref-id', ''))
+    ref_path = resolve_tiff_path(
+        mcr.request_json.get('ref-id'),
+        segment=segment,
+        timepoint=ref_time,
+        set_name='standard'
+    )
 
     output_path = os.path.join(mcr.directory, 'result')
     
