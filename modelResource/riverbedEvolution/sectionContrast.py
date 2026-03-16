@@ -1,6 +1,7 @@
 import os
 import sys
 import copy
+import json
 from osgeo import gdal
 
 module_path = os.path.abspath(os.path.join(os.getcwd()))
@@ -14,20 +15,61 @@ import numpy as np
 from osgeo import gdal, osr
 from util.rustfs import resolve_resource_path
 
+
+def _debug_log(stage, payload):
+    print(
+        f"[riverbed-debug][sectionContrast][{stage}] "
+        f"{json.dumps(payload, ensure_ascii=False, default=str)}",
+        flush=True,
+    )
+
+
+def _dataset_debug_info(path):
+    base, _ = os.path.splitext(path)
+    info = {
+        "path": os.path.abspath(path),
+        "exists": os.path.exists(path),
+        "sidecars": {
+            "tfw": os.path.exists(f"{base}.tfw"),
+            "aux_xml": os.path.exists(f"{path}.aux.xml"),
+            "ovr": os.path.exists(f"{path}.ovr"),
+        },
+    }
+    dataset = gdal.Open(path)
+    if dataset is None:
+        info["open"] = False
+        return info
+
+    band = dataset.GetRasterBand(1)
+    info.update(
+        {
+            "open": True,
+            "projection": dataset.GetProjection(),
+            "geo_transform": list(dataset.GetGeoTransform()),
+            "raster_x_size": dataset.RasterXSize,
+            "raster_y_size": dataset.RasterYSize,
+            "nodata": band.GetNoDataValue() if band is not None else None,
+        }
+    )
+    dataset = None
+    return info
+
+
 # specific crs change process
 def transform_coordinates(coords, source_srs, target_srs):
     # 创建坐标转换对象
     transform = osr.CoordinateTransformation(source_srs, target_srs)
-    
+
     # 转换坐标
     transformed_coords = []
     for coord in coords:
         x, y = coord
         transformed_coords.append(transform.TransformPoint(x, y)[0:2])
-    
+
     return transformed_coords
 
-# get each sample point's pixel coors and the ratio of line and colomn 
+
+# get each sample point's pixel coors and the ratio of line and colomn
 def prj2imagexy(dataset, sample_points):
     trans = dataset.GetGeoTransform()
     originX = trans[0]
@@ -43,13 +85,17 @@ def prj2imagexy(dataset, sample_points):
         imgCoors.append([int(row), int(column), row % 1, column % 1])
     return imgCoors
 
-# change the origin crs of geojson data to 2437 
+
+# change the origin crs of geojson data to 2437
 def convert_geojson_to_2437(geojson_data, dataset):
-    
     # 检查GeoJSON的坐标系
     srs = osr.SpatialReference()
-    if geojson_data.get('crs') and geojson_data['crs'].get('properties') and geojson_data['crs']['properties'].get('name'):
-        srs.SetFromUserInput(geojson_data['crs']['properties']['name'])
+    if (
+        geojson_data.get("crs")
+        and geojson_data["crs"].get("properties")
+        and geojson_data["crs"]["properties"].get("name")
+    ):
+        srs.SetFromUserInput(geojson_data["crs"]["properties"]["name"])
     else:
         # 如果没有坐标系信息，假设是WGS84
         srs.ImportFromEPSG(4326)
@@ -57,46 +103,45 @@ def convert_geojson_to_2437(geojson_data, dataset):
     # 获取DEM的坐标系
     target_srs = osr.SpatialReference()
     target_srs.ImportFromWkt(dataset.GetProjection())
-    
+
     # 要素与要素数据集的区别
-    if not geojson_data.get('features'):
+    if not geojson_data.get("features"):
         features = []
-        coordinates = geojson_data['geometry']['coordinates']
+        coordinates = geojson_data["geometry"]["coordinates"]
         # swarp coordinates
         for coordinate in coordinates:
             tmp = coordinate[0]
             coordinate[0] = coordinate[1]
             coordinate[1] = tmp
         feature = {
-            "type": "Feature", 
+            "type": "Feature",
             "properties": {},
-            "geometry": {
-                "type": "LineString",
-                "coordinates": coordinates
-            } 
+            "geometry": {"type": "LineString", "coordinates": coordinates},
         }
         features.append(feature)
-        geojson_data['features'] = features
+        geojson_data["features"] = features
 
     features = []
-    for feature in geojson_data['features']:
+    for feature in geojson_data["features"]:
         # 转换坐标
-        transformed_coords = transform_coordinates(feature['geometry']['coordinates'], srs, target_srs)
-        
+        transformed_coords = transform_coordinates(
+            feature["geometry"]["coordinates"], srs, target_srs
+        )
+
         # 更新Feature的坐标
-        feature['geometry']['coordinates'] = transformed_coords
-        
+        feature["geometry"]["coordinates"] = transformed_coords
+
         # 添加转换后的Feature到列表
         features.append(feature)
-    
+
     # 更新GeoJSON数据
-    geojson_data['features'] = features
+    geojson_data["features"] = features
 
     return geojson_data
 
+
 # get 4 pixel coors to be interpolated
 def get_interpolated_pixel_index(image_coors, width, height):
-
     def clamp(_x, _max):
         return min(_max, max(_x, 0))
 
@@ -108,6 +153,7 @@ def get_interpolated_pixel_index(image_coors, width, height):
         xm1 = int(clamp(x - 1, width - 1))
         yp1 = int(clamp(y + 1, height - 1))
         xp1 = int(clamp(x + 1, width - 1))
+        interpolated_pixel = [x, y, x, y, x, y, x, y]
 
         ratio_y = image_coor[2]
         ratio_x = image_coor[3]
@@ -122,11 +168,14 @@ def get_interpolated_pixel_index(image_coors, width, height):
         interpolated_pixels.append(interpolated_pixel)
     return interpolated_pixels
 
+
 # get the elevation of the 4 pixel coors
 def get_elevation(interpolated_coors, dataset):
     Z = []
     band = dataset.GetRasterBand(1)
-    dem_data = band.ReadAsArray(0, 0, dataset.RasterXSize, dataset.RasterYSize).astype(np.float32)
+    dem_data = band.ReadAsArray(0, 0, dataset.RasterXSize, dataset.RasterYSize).astype(
+        np.float32
+    )
     dem_data = np.array(dem_data)
     for interpolated_coor in interpolated_coors:
         z1 = dem_data[interpolated_coor[1]][interpolated_coor[0]]
@@ -136,9 +185,9 @@ def get_elevation(interpolated_coors, dataset):
         Z.append([z1, z2, z3, z4])
     return Z
 
+
 # merged main processes
 def get_sample_points_vec3(dataset, section_geometry, num_points=100):
-    
     # change the origin crs of geojson data to 2437
     section_geometry_proj = convert_geojson_to_2437(section_geometry, dataset)
     # sample points in the input section
@@ -155,18 +204,19 @@ def get_sample_points_vec3(dataset, section_geometry, num_points=100):
     sample_points_vec3 = bilinear_interpolation(image_coors, Z, sample_points)
     return sample_points_vec3, sample_points, step
 
+
 # general linear interpolation
 def linear_interpolation(A, B, p):
     return A + p * (B - A)
 
+
 # bilinear interpolation to get the vec3 of sample_points
 def bilinear_interpolation(image_coors, Z, sample_points):
-
     sample_points_vec3 = []
     for index, image_coor in enumerate(image_coors):
         ratio_y = image_coor[2]
         ratio_x = image_coor[3]
-        z_values =  Z[index]
+        z_values = Z[index]
         p1 = 0
         p2 = 0
         if ratio_y < 0.5 and ratio_x < 0.5:
@@ -187,11 +237,12 @@ def bilinear_interpolation(image_coors, Z, sample_points):
         sample_points_vec3.append([sample_points[index][0], sample_points[index][1], z])
     return sample_points_vec3
 
-def get_contrast_result(raster_arr, section_geometry):
 
+def get_contrast_result(raster_arr, section_geometry):
     # deepcopy
     geometry = copy.deepcopy(section_geometry)
     result = []
+    step = 0
     # 遍历每个dem
     for i in range(len(raster_arr)):
         values_arr = []
@@ -205,92 +256,139 @@ def get_contrast_result(raster_arr, section_geometry):
         geometry = copy.deepcopy(section_geometry)
     return result, step
 
-def section_contrast(benchmark_path, refer_path, raster_path, section_geometry, result_path):
 
-    raster_path = os.path.join(raster_path, 'flush.tif')
+def section_contrast(
+    benchmark_path, refer_path, raster_path, section_geometry, result_path
+):
+    raster_path = os.path.join(raster_path, "flush.tif")
 
     if not os.path.exists(result_path):
         os.makedirs(result_path)
-    result_path = os.path.join(result_path, 'section_contrast.txt')
+    result_path = os.path.join(result_path, "section_contrast.txt")
 
     raster_arr = [benchmark_path, refer_path]
     contrast_result, interval = get_contrast_result(raster_arr, section_geometry)
 
     dataset = gdal.Open(raster_path)
-    
+
     geometry = copy.deepcopy(section_geometry)
     flush_result, scatters, step = get_sample_points_vec3(dataset, geometry)
 
-    with open(result_path, "w", encoding='utf-8') as file:
+    with open(result_path, "w", encoding="utf-8") as file:
         for i in range(2):
             for j in range(len(contrast_result[i])):
-                file.write(str(contrast_result[i][j]) + '\n')
-            file.write('\n')
+                file.write(str(contrast_result[i][j]) + "\n")
+            file.write("\n")
 
         for i in range(len(flush_result)):
-            file.write(str(flush_result[i][2]) + '\n')
+            file.write(str(flush_result[i][2]) + "\n")
     del dataset
 
     return interval
 
+
 ##########################################################################################
-    
+
+
 @model.model_status_controller_sync
 def run_section_contrast_mcr(mcr: model.ModelCaseReference):
-    
-    bench_path = resolve_resource_path(mcr.request_json['bench-id'])
-    ref_path = resolve_resource_path(mcr.request_json['ref-id'])
-    global_output_path = os.path.join(global_mcr.directory, 'result')
-    section_geometry = mcr.request_json['section-geometry']
-    output_path = os.path.join(mcr.directory, 'result')
-    
-    interval = section_contrast(bench_path, ref_path, global_output_path, section_geometry, output_path)
-    
-    return {
-        
-        "case-id": mcr.id,
-        "raw-txt": 'section_contrast.txt',
-        "interval": interval
-    }
+    bench_path = resolve_resource_path(mcr.request_json["bench-id"])
+    ref_path = resolve_resource_path(mcr.request_json["ref-id"])
+    if global_mcr is None:
+        raise RuntimeError("Global flush case is not available")
+    global_output_path = os.path.join(global_mcr.directory, "result")
+    section_geometry = mcr.request_json["section-geometry"]
+    output_path = os.path.join(mcr.directory, "result")
+
+    _debug_log(
+        "resolved_input",
+        {
+            "case_id": mcr.id,
+            "request_bench_id": mcr.request_json["bench-id"],
+            "request_ref_id": mcr.request_json["ref-id"],
+            "bench": _dataset_debug_info(bench_path),
+            "ref": _dataset_debug_info(ref_path),
+            "global_flush_tif": _dataset_debug_info(
+                os.path.join(global_output_path, "flush.tif")
+            ),
+            "section_geometry_type": section_geometry.get("type")
+            if isinstance(section_geometry, dict)
+            else type(section_geometry).__name__,
+        },
+    )
+
+    interval = section_contrast(
+        bench_path, ref_path, global_output_path, section_geometry, output_path
+    )
+
+    _debug_log(
+        "result_summary",
+        {
+            "case_id": mcr.id,
+            "interval": interval,
+            "output_txt": os.path.abspath(
+                os.path.join(output_path, "section_contrast.txt")
+            ),
+        },
+    )
+
+    return {"case-id": mcr.id, "raw-txt": "section_contrast.txt", "interval": interval}
+
 
 ##########################################################################################
 
-NAME = 'Section Contrast'
+NAME = "Section Contrast"
 
-CATEGORY = 'Riverbed Evolution'
+CATEGORY = "Riverbed Evolution"
 
-CATEGORY_ALIAS = 're'
- 
-def PARSING(self, request_json: dict, model_path: str, other_dependent_ids: list[str]=[]):
-    
+CATEGORY_ALIAS = "re"
+
+
+def PARSING(
+    self, request_json: dict, model_path: str, other_dependent_ids: list[str] = []
+):
     region_json = request_json
     global_json = {
-        'bench-id': region_json['bench-id'],
-        'ref-id': region_json['ref-id'],
-        'region-geometry': 'NONE'
+        "bench-id": region_json["bench-id"],
+        "ref-id": region_json["ref-id"],
+        "region-geometry": "NONE",
     }
-    global_mcr = model.launcher.fetch_model_from_API(config.API_RE_REGION_FLUSH).run(global_json, other_dependent_ids)
-    region_mcr = model.ModelCaseReference.create(config.API_RE_SECTION_CONTRAST, region_json, NAME, model_path, other_dependent_ids + [global_mcr.id])
-    
+    global_mcr = model.launcher.fetch_model_from_API(config.API_RE_REGION_FLUSH).run(
+        global_json, other_dependent_ids
+    )
+    region_mcr = model.ModelCaseReference.create(
+        config.API_RE_SECTION_CONTRAST,
+        region_json,
+        NAME,
+        model_path,
+        other_dependent_ids + [global_mcr.id],
+    )
+
     return [global_mcr, region_mcr]
 
-def RESPONSING(self, core_mcr: model.ModelCaseReference, default_pre_mcrs: list[model.ModelCaseReference], other_pre_mcrs: list[model.ModelCaseReference]):
-    
-    return core_mcr.make_response({
-                    'case-id': 'TEMPLATE',
-                    'raw-txt': 'NONE',
-                    'interval': 'NONE'
-                })
+
+def RESPONSING(
+    self,
+    core_mcr: model.ModelCaseReference,
+    default_pre_mcrs: list[model.ModelCaseReference],
+    other_pre_mcrs: list[model.ModelCaseReference],
+):
+    return core_mcr.make_response(
+        {"case-id": "TEMPLATE", "raw-txt": "NONE", "interval": "NONE"}
+    )
+
 
 ##########################################################################################
 
-if __name__ == '__main__':
-    
-    v1 = sys.argv[1]    # global model case reference id
-    v2 = sys.argv[2]    # region model case reference id
-    
+if __name__ == "__main__":
+    v1 = sys.argv[1]  # global model case reference id
+    v2 = sys.argv[2]  # region model case reference id
+
     global_mcr = model.ModelCaseReference.open_case(v1)
     region_mcr = model.ModelCaseReference.open_case(v2)
-    
+
     # Run model case (Section Contrast)
-    run_section_contrast_mcr(region_mcr, global_mcr.id)
+    if global_mcr is not None:
+        global_mcr = global_mcr
+    if region_mcr is not None:
+        run_section_contrast_mcr(region_mcr)

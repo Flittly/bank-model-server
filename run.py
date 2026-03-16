@@ -4,10 +4,14 @@ import os
 os.environ["PROJ_LIB"] = ""
 
 import config
+import uvicorn
 from model import launcher
 from app import create_app
 from util import StorageMonitor
-import uvicorn
+from util.gdal_env import configure_gdal_proj_env
+
+
+configure_gdal_proj_env()
 
 
 def initialize_work_space():
@@ -29,29 +33,6 @@ def initialize_work_space():
 
 
 if __name__ == "__main__":
-    # Set PROJ_LIB environment variable to use the proj data from the venv
-    import sys
-
-    if sys.platform == "win32":
-        venv_path = os.path.dirname(sys.executable)
-        proj_lib = os.path.join(venv_path, "Library", "share", "proj")
-        if not os.path.exists(proj_lib):
-            # check alternative location for standard python install/uv
-            proj_lib = os.path.join(venv_path, "..", "share", "proj")
-
-        # Fallback to checking site-packages if not found in Library/share/proj
-        if not os.path.exists(proj_lib):
-            import site
-
-            site_packages = site.getsitepackages()[
-                0
-            ]  # usually the first one is the venv site-packages
-            proj_lib = os.path.join(site_packages, "osgeo", "data", "proj")
-
-        if os.path.exists(proj_lib):
-            os.environ["PROJ_LIB"] = proj_lib
-            print(f"Set PROJ_LIB to: {proj_lib}")
-
     initialize_work_space()
 
     app = create_app()

@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import warnings
 
 module_path = os.path.abspath(os.path.join(os.getcwd()))
 if module_path not in sys.path:
@@ -14,6 +15,57 @@ from math import sqrt
 import copy
 import numpy as np
 from util.rustfs import resolve_tiff_path
+
+
+def _debug_log(stage, payload):
+    print(
+        f"[riverbed-debug][sectionView][{stage}] "
+        f"{json.dumps(payload, ensure_ascii=False, default=str)}",
+        flush=True,
+    )
+
+
+def _dataset_debug_info(path):
+    base, _ = os.path.splitext(path)
+    info = {
+        "path": os.path.abspath(path),
+        "exists": os.path.exists(path),
+        "sidecars": {
+            "tfw": os.path.exists(f"{base}.tfw"),
+            "aux_xml": os.path.exists(f"{path}.aux.xml"),
+            "ovr": os.path.exists(f"{path}.ovr"),
+        },
+    }
+    dataset = gdal.Open(path)
+    if dataset is None:
+        info["open"] = False
+        return info
+
+    band = dataset.GetRasterBand(1)
+    info.update(
+        {
+            "open": True,
+            "projection": dataset.GetProjection(),
+            "geo_transform": list(dataset.GetGeoTransform()),
+            "raster_x_size": dataset.RasterXSize,
+            "raster_y_size": dataset.RasterYSize,
+            "nodata": band.GetNoDataValue() if band is not None else None,
+        }
+    )
+    dataset = None
+    return info
+
+
+def _geometry_debug_info(geometry):
+    if not isinstance(geometry, dict):
+        return {"python_type": type(geometry).__name__}
+    crs = geometry.get("crs") or {}
+    properties = crs.get("properties") or {}
+    return {
+        "type": geometry.get("type"),
+        "crs": properties.get("name"),
+        "has_features": bool(geometry.get("features")),
+    }
 
 
 def euclidean_distance(point1, point2):
@@ -126,6 +178,7 @@ def get_interpolated_pixel_index(image_coors, width, height):
         xm1 = int(clamp(x - 1, width - 1))
         yp1 = int(clamp(y + 1, height - 1))
         xp1 = int(clamp(x + 1, width - 1))
+        interpolated_pixel = [x, y, x, y, x, y, x, y]
 
         ratio_y = image_coor[2]
         ratio_x = image_coor[3]
@@ -209,7 +262,16 @@ def computeSaIndex_v(sample_v_points):
             sample_v_points[i + 1][0],
             sample_v_points[i + 1][1],
         )
-        Sa.append((sample_v_points[i + 1][2] - sample_v_points[i][2]) / d)
+        # 避免除零错误：如果距离为 0，斜率设为 0 并发出警告
+        if d == 0:
+            warnings.warn(
+                f"Distance between points {i} and {i + 1} is zero, slope set to 0. "
+                f"Points: {sample_v_points[i]}, {sample_v_points[i + 1]}",
+                RuntimeWarning,
+            )
+            Sa.append(0.0)
+        else:
+            Sa.append((sample_v_points[i + 1][2] - sample_v_points[i][2]) / d)
     return Sa
 
 
@@ -254,6 +316,13 @@ def section_view(dem_path, section_geometry, output_path):
     output_raw_path = os.path.join(output_path, "section.json")
 
     dataset = gdal.Open(dem_path)
+    _debug_log(
+        "opened_dataset",
+        {
+            "dem": _dataset_debug_info(dem_path),
+            "section_geometry": _geometry_debug_info(section_geometry),
+        },
+    )
 
     geometry = copy.deepcopy(section_geometry)
     num_points = 100
@@ -418,6 +487,21 @@ def run_section_view_mcr(mcr: model.ModelCaseReference):
             dem_id, segment=segment, timepoint=time_point, set_name="standard"
         )
 
+    _debug_log(
+        "resolved_input",
+        {
+            "case_id": mcr.id,
+            "segment": segment,
+            "time_point": time_point,
+            "request_dem_id": dem_id,
+            "resolved_dem_path": os.path.abspath(dem_path),
+            "section_geometry": _geometry_debug_info(
+                mcr.request_json.get("section-geometry")
+            ),
+            "dem": _dataset_debug_info(dem_path),
+        },
+    )
+
     section_geometry = mcr.request_json["section-geometry"]
     output_path = os.path.join(mcr.directory, "result")
 
@@ -425,6 +509,32 @@ def run_section_view_mcr(mcr: model.ModelCaseReference):
         raise TypeError("Feature Collection Is Not Allowed")
 
     result = section_view(dem_path, section_geometry, output_path)
+
+    raw_json_path = os.path.join(output_path, result["raw-file"])
+    slope_foot_index = None
+    deepest_index = None
+    sample_v_count = None
+    sa_v_count = None
+    if os.path.exists(raw_json_path):
+        with open(raw_json_path, "r", encoding="utf-8") as file:
+            raw_data = json.load(file)
+        slope_foot_index = raw_data.get("slope_foot_index")
+        deepest_index = raw_data.get("deepest_index")
+        sample_v_count = len(raw_data.get("points_v") or [])
+        sa_v_count = len(raw_data.get("Sa_v") or [])
+
+    _debug_log(
+        "result_summary",
+        {
+            "case_id": mcr.id,
+            "raw_json_path": raw_json_path,
+            "interval": result["interval"],
+            "deepest_index": deepest_index,
+            "slope_foot_index": slope_foot_index,
+            "sample_v_count": sample_v_count,
+            "sa_v_count": sa_v_count,
+        },
+    )
 
     return {
         "case-id": mcr.id,
@@ -477,4 +587,5 @@ if __name__ == "__main__":
     section_view_mcr = model.ModelCaseReference.open_case(v1)
 
     # Run section view model case
-    run_section_view_mcr(section_view_mcr)
+    if section_view_mcr is not None:
+        run_section_view_mcr(section_view_mcr)
