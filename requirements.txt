@@ -20,3 +20,5 @@ pyproj>=3.6.0
 # Image processing
 pillow>=10.0.0
 portalocker>=2.8.0
+
+confluent-kafka==2.3.0

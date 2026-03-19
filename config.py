@@ -161,3 +161,13 @@ CAL_CORE_NUM = 5
 MAX_RUNNING_MODEL_CASE_NUM = 20
 MODEL_SERVICE_POLL_INTERVAL = 1
 MODEL_SERVICE_DEFAULT_TIMEOUT = 600
+
+# Kafka 配置
+KAFKA_ENABLED = _env_flag("KAFKA_ENABLED", False)
+KAFKA_BOOTSTRAP_SERVERS = os.getenv(
+    "KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"
+).split(",")
+KAFKA_TASK_TOPIC = os.getenv("KAFKA_TASK_TOPIC", "bank.model.task.v1")
+KAFKA_RESULT_TOPIC = os.getenv("KAFKA_RESULT_TOPIC", "bank.model.result.v1")
+KAFKA_WORKER_GROUP = os.getenv("KAFKA_WORKER_GROUP", "bank-model-workers")
+KAFKA_WORKER_ID = os.getenv("KAFKA_WORKER_ID", "python-worker-01")

@@ -81,6 +81,42 @@ BEFORE UPDATE ON tasks
 FOR EACH ROW EXECUTE FUNCTION update_tasks_updated_at();
 
 -- ========================================
+-- 2.1 任务运行实例表 (task_runs)
+-- 存储任务的每次运行记录
+-- ========================================
+CREATE TABLE IF NOT EXISTS task_runs (
+    id SERIAL PRIMARY KEY,
+    run_id VARCHAR(100) UNIQUE NOT NULL,
+    task_id VARCHAR(100) NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'submitted',
+    expected_count INTEGER NOT NULL DEFAULT 0,
+    completed_count INTEGER NOT NULL DEFAULT 0,
+    failed_count INTEGER NOT NULL DEFAULT 0,
+    error_message TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_runs_task_id ON task_runs(task_id);
+CREATE INDEX IF NOT EXISTS idx_task_runs_status ON task_runs(status);
+
+CREATE OR REPLACE FUNCTION update_task_runs_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ language 'plpgsql';
+
+DROP TRIGGER IF EXISTS trigger_task_runs_updated_at ON task_runs;
+CREATE TRIGGER trigger_task_runs_updated_at
+BEFORE UPDATE ON task_runs
+FOR EACH ROW EXECUTE FUNCTION update_task_runs_updated_at();
+
+-- ========================================
 -- 2. 基础参数表 (basic_params)
 -- 存储模型计算所需的所有基础参数
 -- ========================================

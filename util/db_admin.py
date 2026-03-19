@@ -6,7 +6,9 @@ from psycopg2 import sql
 import config
 
 
-SCHEMA_SQL_PATH = Path(__file__).resolve().parent.parent / "database_schema.sql"
+SCHEMA_SQL_PATH = (
+    Path(__file__).resolve().parent.parent / "docs" / "database_schema.sql"
+)
 
 
 MIGRATION_SQL = """
