@@ -1143,3 +1143,193 @@ def bulk_create_hydrodynamic_data(data_list: list) -> int:
             ],
         )
         return cursor.rowcount
+
+
+# ========================================
+# TIFF 边界相关操作
+# ========================================
+
+
+def get_tiff_bounds(tiff_key: str) -> Optional[Dict[str, Any]]:
+    """
+    从数据库获取 TIFF 边界信息
+
+    Args:
+        tiff_key: TIFF 文件的资源键
+
+    Returns:
+        边界信息字典，如果不存在返回 None
+    """
+    with db.get_db_cursor(dict_cursor=True) as (conn, cursor):
+        cursor.execute(
+            """
+            SELECT tiff_key, region_code, year, timepoint,
+                   min_x, min_y, max_x, max_y,
+                   ST_AsText(geom) as geom_wkt
+            FROM tiff_bounds
+            WHERE tiff_key = %s
+            """,
+            (tiff_key,),
+        )
+        row = cursor.fetchone()
+        if row:
+            return {
+                "tiff_key": row["tiff_key"],
+                "region_code": row["region_code"],
+                "year": row["year"],
+                "timepoint": row["timepoint"],
+                "min_x": float(row["min_x"]),
+                "min_y": float(row["min_y"]),
+                "max_x": float(row["max_x"]),
+                "max_y": float(row["max_y"]),
+                "geom_wkt": row["geom_wkt"],
+            }
+        return None
+
+
+def save_tiff_bounds(
+    tiff_key: str,
+    region_code: Optional[str],
+    year: Optional[str],
+    timepoint: Optional[str],
+    min_x: float,
+    min_y: float,
+    max_x: float,
+    max_y: float,
+    srid: int = 3857,
+) -> int:
+    """
+    保存 TIFF 边界信息到数据库
+
+    Args:
+        tiff_key: TIFF 文件的资源键
+        region_code: 区域代码
+        year: 年份
+        timepoint: 时间点
+        min_x: 最小 X 坐标
+        min_y: 最小 Y 坐标
+        max_x: 最大 X 坐标
+        max_y: 最大 Y 坐标
+        srid: 原始坐标系的 SRID
+
+    Returns:
+        插入记录的 ID
+    """
+    # 构建 WKT 多边形
+    geom_wkt = f"POLYGON(({min_x} {min_y}, {max_x} {min_y}, {max_x} {max_y}, {min_x} {max_y}, {min_x} {min_y}))"
+
+    with db.get_db_cursor() as (conn, cursor):
+        # 使用 ST_Transform 将原始坐标转换为 4326
+        cursor.execute(
+            """
+            INSERT INTO tiff_bounds (tiff_key, region_code, year, timepoint,
+                                     min_x, min_y, max_x, max_y, geom)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 
+                    ST_Transform(ST_SetSRID(ST_GeomFromText(%s), %s), 4326))
+            ON CONFLICT (tiff_key) DO UPDATE SET
+                region_code = EXCLUDED.region_code,
+                year = EXCLUDED.year,
+                timepoint = EXCLUDED.timepoint,
+                min_x = EXCLUDED.min_x,
+                min_y = EXCLUDED.min_y,
+                max_x = EXCLUDED.max_x,
+                max_y = EXCLUDED.max_y,
+                geom = EXCLUDED.geom,
+                updated_at = CURRENT_TIMESTAMP
+            RETURNING id
+            """,
+            (
+                tiff_key,
+                region_code,
+                year,
+                timepoint,
+                min_x,
+                min_y,
+                max_x,
+                max_y,
+                geom_wkt,
+                srid,
+            ),
+        )
+        result = cursor.fetchone()
+        return result[0] if result else None
+
+
+def validate_section_with_river(section_geometry: Dict[str, Any]) -> bool:
+    """
+    验证 section 是否与长江面相交
+
+    Args:
+        section_geometry: section 的 GeoJSON 几何
+
+    Returns:
+        是否相交
+    """
+    with db.get_db_cursor() as (conn, cursor):
+        cursor.execute(
+            """
+            SELECT COUNT(*) > 0 as intersects
+            FROM river_yangtze
+            WHERE ST_Intersects(geom, ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326))
+            """,
+            (json.dumps(section_geometry),),
+        )
+        result = cursor.fetchone()
+        return result[0] if result else False
+
+
+def validate_section_with_tiff(section_geometry: Dict[str, Any], tiff_key: str) -> bool:
+    """
+    验证 section 是否在 TIFF 范围内
+
+    Args:
+        section_geometry: section 的 GeoJSON 几何
+        tiff_key: TIFF 文件的资源键
+
+    Returns:
+        是否在范围内
+    """
+    with db.get_db_cursor() as (conn, cursor):
+        cursor.execute(
+            """
+            SELECT COUNT(*) > 0 as within_bounds
+            FROM tiff_bounds
+            WHERE tiff_key = %s
+              AND ST_Within(
+                  ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326),
+                  geom
+              )
+            """,
+            (tiff_key, json.dumps(section_geometry)),
+        )
+        result = cursor.fetchone()
+        return result[0] if result else False
+
+
+def update_section_validation(
+    section_id: str,
+    is_valid: bool,
+    validation_status: str,
+    validation_message: str,
+) -> None:
+    """
+    更新 section 的验证状态
+
+    Args:
+        section_id: section 的业务 ID
+        is_valid: 是否合法
+        validation_status: 验证状态
+        validation_message: 验证消息
+    """
+    with db.get_db_cursor() as (conn, cursor):
+        cursor.execute(
+            """
+            UPDATE cross_sections
+            SET is_valid = %s,
+                validation_status = %s,
+                validation_message = %s,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE section_id = %s
+            """,
+            (is_valid, validation_status, validation_message, section_id),
+        )

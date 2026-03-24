@@ -271,3 +271,46 @@ def get_task_results(task_id: str) -> dict[str, Any]:
 
 def get_bank_result(section_id: str) -> dict[str, Any]:
     return task_service.get_bank_result(section_id)
+
+
+def extract_tiff_bounds(tiff_key: str) -> dict[str, Any]:
+    """提取 tiff 文件边界并存储到数据库"""
+    from util.rustfs import resolve_tiff_path, extract_tiff_bounds
+    from util.db_ops import save_tiff_bounds
+
+    # 解析 tiff 路径
+    parts = tiff_key.split("/")
+    segment = parts[1] if len(parts) > 1 else ""
+    timepoint = parts[4] if len(parts) > 4 else None
+
+    # 获取 tiff 文件路径
+    tiff_path = resolve_tiff_path(tiff_key, segment=segment, timepoint=timepoint)
+
+    # 提取边界
+    bounds = extract_tiff_bounds(tiff_path)
+
+    # 解析 region_code, year
+    region_code = segment
+    year = parts[2] if len(parts) > 2 else None
+
+    # 存储到数据库
+    save_tiff_bounds(
+        tiff_key=tiff_key,
+        region_code=region_code,
+        year=year,
+        timepoint=timepoint,
+        min_x=bounds["min_x"],
+        min_y=bounds["min_y"],
+        max_x=bounds["max_x"],
+        max_y=bounds["max_y"],
+        srid=bounds.get("srid", 3857),
+    )
+
+    return {
+        "tiff_key": tiff_key,
+        "min_x": bounds["min_x"],
+        "min_y": bounds["min_y"],
+        "max_x": bounds["max_x"],
+        "max_y": bounds["max_y"],
+        "srid": bounds.get("srid", 3857),
+    }

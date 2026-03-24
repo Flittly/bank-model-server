@@ -233,10 +233,15 @@ CREATE TABLE IF NOT EXISTS cross_sections (
     
     -- 其他参数
     other_params JSONB,
-    
+
+    -- 验证字段
+    is_valid BOOLEAN DEFAULT NULL,
+    validation_status VARCHAR(50) DEFAULT 'pending',
+    validation_message TEXT,
+
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    
+
     FOREIGN KEY (task_id) REFERENCES tasks(task_id) ON DELETE CASCADE,
     FOREIGN KEY (basic_param_id) REFERENCES basic_params(id) ON DELETE SET NULL
 );
@@ -352,3 +357,42 @@ CREATE TABLE IF NOT EXISTS hydrodynamic_data (
 
 CREATE INDEX IF NOT EXISTS idx_hydro_data_point ON hydrodynamic_data(point_id);
 CREATE INDEX IF NOT EXISTS idx_hydro_data_timestep ON hydrodynamic_data(time_step);
+
+-- ========================================
+-- 8. TIFF 边界表 (tiff_bounds)
+-- 存储 tiff 文件的地理边界，用于 section 验证
+-- ========================================
+CREATE TABLE IF NOT EXISTS tiff_bounds (
+    id SERIAL PRIMARY KEY,
+    tiff_key VARCHAR(255) UNIQUE NOT NULL,  -- 如 'tiff/Mzs/2023/standard/202304/202304.tif'
+    region_code VARCHAR(50),
+    year VARCHAR(10),
+    timepoint VARCHAR(20),
+    
+    -- 边界信息
+    min_x NUMERIC NOT NULL,
+    min_y NUMERIC NOT NULL,
+    max_x NUMERIC NOT NULL,
+    max_y NUMERIC NOT NULL,
+    geom GEOMETRY(Polygon, 4326),  -- 边界多边形
+    
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_tiff_bounds_key ON tiff_bounds(tiff_key);
+CREATE INDEX IF NOT EXISTS idx_tiff_bounds_region ON tiff_bounds(region_code);
+CREATE INDEX IF NOT EXISTS idx_tiff_bounds_geom ON tiff_bounds USING GIST(geom);
+
+CREATE OR REPLACE FUNCTION update_tiff_bounds_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ language 'plpgsql';
+
+DROP TRIGGER IF EXISTS trigger_tiff_bounds_updated_at ON tiff_bounds;
+CREATE TRIGGER trigger_tiff_bounds_updated_at
+BEFORE UPDATE ON tiff_bounds
+FOR EACH ROW EXECUTE FUNCTION update_tiff_bounds_updated_at();

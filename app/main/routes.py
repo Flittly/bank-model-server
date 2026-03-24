@@ -395,6 +395,23 @@ async def get_hydrodynamic_resource_list() -> dict[str, Any]:
     return controllers.get_hydrodynamic_resource_list()
 
 
+@api_router.post("/api/v1/tiff/extract-bounds")
+async def extract_tiff_bounds_api(request: Request) -> dict[str, Any]:
+    """提取 tiff 文件边界并存储到数据库"""
+    body = await request.json()
+    tiff_key = body.get("tiff_key")
+    if not tiff_key:
+        raise HTTPException(status_code=400, detail="Missing tiff_key")
+
+    try:
+        result = controllers.extract_tiff_bounds(tiff_key)
+        return {"success": True, **result}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @api_router.get(f"{config.API_VERSION}" + "/{category}/{model_name}")
 async def get_model_runner(
     category: str, model_name: str, request: Request

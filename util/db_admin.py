@@ -74,6 +74,36 @@ ADD COLUMN IF NOT EXISTS temp BOOLEAN DEFAULT FALSE NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_hydro_points_temp
 ON hydrodynamic_points(temp);
+
+-- 添加 section 验证字段
+ALTER TABLE cross_sections
+ADD COLUMN IF NOT EXISTS is_valid BOOLEAN DEFAULT NULL;
+
+ALTER TABLE cross_sections
+ADD COLUMN IF NOT EXISTS validation_status VARCHAR(50) DEFAULT 'pending';
+
+ALTER TABLE cross_sections
+ADD COLUMN IF NOT EXISTS validation_message TEXT;
+
+-- 创建 tiff_bounds 表
+CREATE TABLE IF NOT EXISTS tiff_bounds (
+    id SERIAL PRIMARY KEY,
+    tiff_key VARCHAR(255) UNIQUE NOT NULL,
+    region_code VARCHAR(50),
+    year VARCHAR(10),
+    timepoint VARCHAR(20),
+    min_x NUMERIC NOT NULL,
+    min_y NUMERIC NOT NULL,
+    max_x NUMERIC NOT NULL,
+    max_y NUMERIC NOT NULL,
+    geom GEOMETRY(Polygon, 4326),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_tiff_bounds_key ON tiff_bounds(tiff_key);
+CREATE INDEX IF NOT EXISTS idx_tiff_bounds_region ON tiff_bounds(region_code);
+CREATE INDEX IF NOT EXISTS idx_tiff_bounds_geom ON tiff_bounds USING GIST(geom);
 """
 
 
