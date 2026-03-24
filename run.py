@@ -17,6 +17,7 @@ configure_gdal_proj_env()
 def initialize_work_space():
     os.makedirs(config.DIR_MODEL_CASE, exist_ok=True)
     os.makedirs(os.path.dirname(config.DIR_STORAGE_LOG), exist_ok=True)
+    os.makedirs(config.DIR_TERRAIN_CACHE, exist_ok=True)  # 创建地形数据缓存目录
 
     if not os.path.exists(config.DIR_GLOBALE_FILE_LOCKER):
         with open(config.DIR_GLOBALE_FILE_LOCKER, "w") as file:
@@ -32,8 +33,13 @@ def initialize_work_space():
     StorageMonitor().initialize([config.DIR_ROOT], config.DIR_STORAGE_LOG)
 
 
-def start_kafka_worker():
-    """启动 Kafka Worker（如果启用）"""
+def start_kafka_worker(assigned_banks=None):
+    """
+    启动 Kafka Worker（如果启用）
+
+    Args:
+        assigned_banks: 分配给此 Worker 的岸段 ID 列表
+    """
     if not config.KAFKA_ENABLED:
         print("[kafka] Kafka 未启用，跳过启动 Worker")
         return None, None
@@ -41,8 +47,10 @@ def start_kafka_worker():
     try:
         from kafka.kafka_worker import start_worker_in_background
 
-        worker, thread = start_worker_in_background()
+        worker, thread = start_worker_in_background(assigned_banks=assigned_banks)
         print(f"[kafka] Kafka Worker 已在后台启动")
+        if assigned_banks:
+            print(f"[kafka] 分配岸段: {assigned_banks}")
         return worker, thread
     except Exception as e:
         print(f"[kafka] Kafka Worker 启动失败: {e}")
@@ -50,10 +58,27 @@ def start_kafka_worker():
 
 
 if __name__ == "__main__":
+    import argparse
+
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(description="Bank Model Server")
+    parser.add_argument(
+        "--banks",
+        type=str,
+        default="",
+        help="Kafka Worker 分配的岸段 ID，逗号分隔，例如: BANK_001,BANK_002",
+    )
+    args = parser.parse_args()
+
+    # 解析岸段列表
+    assigned_banks = (
+        [b.strip() for b in args.banks.split(",") if b.strip()] if args.banks else None
+    )
+
     initialize_work_space()
 
     # 启动 Kafka Worker
-    kafka_worker, kafka_thread = start_kafka_worker()
+    kafka_worker, kafka_thread = start_kafka_worker(assigned_banks=assigned_banks)
 
     app = create_app()
 

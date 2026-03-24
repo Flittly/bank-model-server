@@ -164,10 +164,30 @@ MODEL_SERVICE_DEFAULT_TIMEOUT = 600
 
 # Kafka 配置
 KAFKA_ENABLED = _env_flag("KAFKA_ENABLED", False)
-KAFKA_BOOTSTRAP_SERVERS = os.getenv(
-    "KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"
-).split(",")
-KAFKA_TASK_TOPIC = os.getenv("KAFKA_TASK_TOPIC", "bank.model.task.v1")
+KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092").split(
+    ","
+)
+KAFKA_TASK_TOPIC = os.getenv("KAFKA_TASK_TOPIC", "bank.model.task")  # 与 Java 端一致
 KAFKA_RESULT_TOPIC = os.getenv("KAFKA_RESULT_TOPIC", "bank.model.result.v1")
 KAFKA_WORKER_GROUP = os.getenv("KAFKA_WORKER_GROUP", "bank-model-workers")
 KAFKA_WORKER_ID = os.getenv("KAFKA_WORKER_ID", "python-worker-01")
+# Worker 负责的岸段 ID（逗号分隔，支持多个岸段）
+# 例如：BANK_001,BANK_002
+# 如果为空，则不指定岸段，由 Kafka 分配
+KAFKA_ASSIGNED_BANKS = (
+    os.getenv("KAFKA_ASSIGNED_BANKS", "").split(",")
+    if os.getenv("KAFKA_ASSIGNED_BANKS")
+    else []
+)
+
+# RustFS 配置
+RUSTFS_ENABLED = _env_flag("RUSTFS_ENABLED", True)
+RUSTFS_ENDPOINT = os.getenv("RUSTFS_ENDPOINT", "http://127.0.0.1:9000")
+RUSTFS_BUCKET = os.getenv("RUSTFS_BUCKET", "yangtze-bank-warning-system")
+RUSTFS_ACCESS_KEY = os.getenv("RUSTFS_ACCESS_KEY", "rustfsadmin")
+RUSTFS_SECRET_KEY = os.getenv("RUSTFS_SECRET_KEY", "rustfsadmin")
+RUSTFS_REGION = os.getenv("RUSTFS_REGION", "us-east-1")
+RUSTFS_SECURE = _env_flag("RUSTFS_SECURE", False)
+
+# 地形数据缓存目录
+DIR_TERRAIN_CACHE = os.path.join(DIR_ROOT, "cache", "terrain")
