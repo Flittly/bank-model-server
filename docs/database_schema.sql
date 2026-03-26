@@ -22,6 +22,9 @@ CREATE TABLE IF NOT EXISTS banks (
     -- 岸段几何（用于前端展示）
     bank_geometry JSONB,
     
+    -- 是否反转（用于前端生成断面方向）
+    reversed BOOLEAN DEFAULT FALSE,
+    
     description TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP

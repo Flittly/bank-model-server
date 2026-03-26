@@ -104,6 +104,10 @@ CREATE TABLE IF NOT EXISTS tiff_bounds (
 CREATE INDEX IF NOT EXISTS idx_tiff_bounds_key ON tiff_bounds(tiff_key);
 CREATE INDEX IF NOT EXISTS idx_tiff_bounds_region ON tiff_bounds(region_code);
 CREATE INDEX IF NOT EXISTS idx_tiff_bounds_geom ON tiff_bounds USING GIST(geom);
+
+-- 添加 banks 表的 reversed 字段
+ALTER TABLE banks
+ADD COLUMN IF NOT EXISTS reversed BOOLEAN DEFAULT FALSE;
 """
 
 
