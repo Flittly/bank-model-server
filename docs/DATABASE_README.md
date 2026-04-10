@@ -2,13 +2,14 @@
 
 ## 概述
 
-本文档描述了岸段、断面、修正线、风险等级结果四个核心表的设计，以及它们之间的关系。
+本文档描述了岸段、断面、修正线、风险等级结果和断面剖面结果等核心表的设计，以及它们之间的关系。
 
 - **banks (岸段表)**: 存储岸段的几何信息
 - **tasks (任务表)**: 存储任务信息，管理断面和风险结果
 - **basic_params (基础参数表)**: 存储参数模板，供断面复用
 - **cross_sections (断面表)**: 存储断面信息，每个断面独立存储完整的模型参数
 - **bank_risk_results (风险等级结果表)**: 存储按照断面计算的风险等级结果
+- **section_profiles (断面剖面结果表)**: 存储前端展示断面剖面线所需的结构化结果
 
 ## 表关系图
 
@@ -27,10 +28,10 @@
          │
          │ 1:N
          ▼
-┌─────────────────┐
-│bank_risk_results│
-│  (风险结果表)   │
-└─────────────────┘
+┌─────────────────┐      ┌─────────────────┐
+│bank_risk_results│      │ section_profiles│
+│  (风险结果表)   │      │ (断面剖面结果表) │
+└─────────────────┘      └─────────────────┘
 ```
 
 ## 表结构详情
@@ -226,6 +227,45 @@ CREATE TABLE IF NOT EXISTS tasks (
 **外键关系**:
 - task_id → tasks(task_id) (ON DELETE CASCADE)
 - section_id → cross_sections(section_id) (ON DELETE CASCADE)
+
+---
+
+### 6. section_profiles (断面剖面结果表)
+
+**说明**: 存储任务运行后每个断面的剖面线结果，供前端点击断面时直接查询展示。
+
+| 字段名 | 类型 | 说明 | 约束 |
+|--------|------|------|------|
+| id | SERIAL | 主键 | PRIMARY KEY |
+| task_id | VARCHAR(100) | 外键 → tasks.task_id | NOT NULL |
+| section_id | VARCHAR(100) | 外键 → cross_sections.section_id | NOT NULL |
+| section_name | VARCHAR(100) | 断面名称 | - |
+| region_code | VARCHAR(50) | 区域代码 | - |
+| bank_id | VARCHAR(100) | 岸段ID | - |
+| dem_id | VARCHAR(255) | 生成剖面使用的 DEM 资源标识 | - |
+| source_case_id | VARCHAR(100) | Python Section View 模型 case id | - |
+| interval | NUMERIC | 断面采样间隔 | - |
+| deepest_index | INTEGER | 最深点索引 | - |
+| slope_foot_index | INTEGER | 坡脚点索引 | - |
+| point_count | INTEGER | 剖面采样点数量 | - |
+| profile_data | JSONB | 结构化剖面数据 | NOT NULL |
+| geom | GEOMETRY(LineString, 4326) | 空间几何 (复制自断面) | - |
+| created_at | TIMESTAMP | 创建时间 | DEFAULT CURRENT_TIMESTAMP |
+| updated_at | TIMESTAMP | 更新时间 | DEFAULT CURRENT_TIMESTAMP |
+
+**索引**:
+- idx_section_profiles_task: task_id
+- idx_section_profiles_section: section_id
+- idx_section_profiles_region: region_code
+- idx_section_profiles_geom: geom (GIST)
+
+**外键关系**:
+- task_id → tasks(task_id) (ON DELETE CASCADE)
+- section_id → cross_sections(section_id) (ON DELETE CASCADE)
+
+**说明补充**:
+- `profile_data` 中保存前端绘图所需的剖面线点集、距离、高程，以及最深点和坡脚点索引
+- 同一任务下同一断面只保留一份最新剖面结果，唯一约束为 `(task_id, section_id)`
 
 ---
 

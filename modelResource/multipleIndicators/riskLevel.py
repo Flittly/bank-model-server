@@ -227,7 +227,20 @@ def get_risk_level(response_list, wRE, wNM, wGE, wRL, risk_threshold):
     elif risk_value >= risk_threshold[2]:
         risk = [0, 0, 0, 1]
 
-    return risk_value[0], risk
+    matrices = {
+        "water_flow_power_matrix": water_flow_power_matrix.tolist(),
+        "riverbed_evolution_matrix": riverbed_evolution_matrix.tolist(),
+        "geology_engineering_matrix": geology_engineering_matrix.tolist(),
+        "concat_matrix": concat_matrix.tolist(),
+        "water_flow_power_result_matrix": water_flow_power_result_matrix.tolist(),
+        "riverbed_evolution_result_matrix": riverbed_evolution_result_matrix.tolist(),
+        "geology_engineering_result_matrix": geology_engineering_result_matrix.tolist(),
+        "weight_matrix": weight_matrix.tolist(),
+        "result_matrix": result_matrix.tolist(),
+        "risk_value_components": [result_matrix[2][0], result_matrix[3][0]],
+    }
+
+    return risk_value[0], risk, matrices
 
 
 ##########################################################################################
@@ -288,7 +301,7 @@ def run_risk_level_mcr(mcr: model.ModelCaseReference):
     if not mcr.request_json["wRL"] == "NONE":
         wRL = mcr.request_json["wRL"]
 
-    result, risk_level = get_risk_level(
+    result, risk_level, matrices = get_risk_level(
         response_list, wRE, wNM, wGE, wRL, risk_threshold
     )
 
@@ -307,6 +320,7 @@ def run_risk_level_mcr(mcr: model.ModelCaseReference):
         },
         "result": result,
         "risk-level": risk_level,
+        "matrices": matrices,
     }
 
 

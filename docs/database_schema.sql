@@ -120,7 +120,7 @@ BEFORE UPDATE ON task_runs
 FOR EACH ROW EXECUTE FUNCTION update_task_runs_updated_at();
 
 -- ========================================
--- 2. 基础参数表 (basic_params)
+-- 3. 基础参数表 (basic_params)
 -- 存储模型计算所需的所有基础参数
 -- ========================================
 CREATE TABLE IF NOT EXISTS basic_params (
@@ -179,7 +179,7 @@ BEFORE UPDATE ON basic_params
 FOR EACH ROW EXECUTE FUNCTION update_basic_params_updated_at();
 
 -- ========================================
--- 3. 断面表 (cross_sections) - 重构版
+-- 4. 断面表 (cross_sections) - 重构版
 -- 存储断面信息，关联任务、岸段和基础参数
 -- ========================================
 CREATE TABLE IF NOT EXISTS cross_sections (
@@ -198,7 +198,10 @@ CREATE TABLE IF NOT EXISTS cross_sections (
     
     -- 断面几何（用于前端展示）
     section_geometry JSONB,
-    
+
+    -- 垂直脚点（用于前端展示,GeoJSON Point）
+    vertical_foot_points JSONB,
+
     -- 距离参数（用于前端显示）
     distance NUMERIC,
     
@@ -295,7 +298,52 @@ CREATE INDEX IF NOT EXISTS idx_bank_results_region ON bank_risk_results(region_c
 CREATE INDEX IF NOT EXISTS idx_bank_results_geom ON bank_risk_results USING GIST(geom);
 
 -- ========================================
--- 6. 水动力点表 (hydrodynamic_points)
+-- 6. 断面剖面结果表 (section_profiles)
+-- 存储前端展示所需的断面剖面线数据
+-- ========================================
+CREATE TABLE IF NOT EXISTS section_profiles (
+    id SERIAL PRIMARY KEY,
+    task_id VARCHAR(100) NOT NULL,
+    section_id VARCHAR(100) NOT NULL,
+    section_name VARCHAR(100),
+    region_code VARCHAR(50),
+    bank_id VARCHAR(100),
+    dem_id VARCHAR(255),
+    source_case_id VARCHAR(100),
+    interval NUMERIC,
+    deepest_index INTEGER,
+    slope_foot_index INTEGER,
+    point_count INTEGER,
+    profile_data JSONB NOT NULL,
+    geom GEOMETRY(LineString, 4326),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (task_id) REFERENCES tasks(task_id) ON DELETE CASCADE,
+    FOREIGN KEY (section_id) REFERENCES cross_sections(section_id) ON DELETE CASCADE,
+    UNIQUE(task_id, section_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_section_profiles_task ON section_profiles(task_id);
+CREATE INDEX IF NOT EXISTS idx_section_profiles_section ON section_profiles(section_id);
+CREATE INDEX IF NOT EXISTS idx_section_profiles_region ON section_profiles(region_code);
+CREATE INDEX IF NOT EXISTS idx_section_profiles_geom ON section_profiles USING GIST(geom);
+
+CREATE OR REPLACE FUNCTION update_section_profiles_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ language 'plpgsql';
+
+DROP TRIGGER IF EXISTS trigger_section_profiles_updated_at ON section_profiles;
+CREATE TRIGGER trigger_section_profiles_updated_at
+BEFORE UPDATE ON section_profiles
+FOR EACH ROW EXECUTE FUNCTION update_section_profiles_updated_at();
+
+-- ========================================
+-- 7. 水动力点表 (hydrodynamic_points)
 -- 存储水动力数据的坐标点信息
 -- ========================================
 CREATE TABLE IF NOT EXISTS hydrodynamic_points (
@@ -338,7 +386,7 @@ BEFORE UPDATE ON hydrodynamic_points
 FOR EACH ROW EXECUTE FUNCTION update_hydrodynamic_points_updated_at();
 
 -- ========================================
--- 7. 水动力数据表 (hydrodynamic_data)
+-- 8. 水动力数据表 (hydrodynamic_data)
 -- 存储每个坐标点在不同时段的水动力数据
 -- ========================================
 CREATE TABLE IF NOT EXISTS hydrodynamic_data (
@@ -362,7 +410,7 @@ CREATE INDEX IF NOT EXISTS idx_hydro_data_point ON hydrodynamic_data(point_id);
 CREATE INDEX IF NOT EXISTS idx_hydro_data_timestep ON hydrodynamic_data(time_step);
 
 -- ========================================
--- 8. TIFF 边界表 (tiff_bounds)
+-- 9. TIFF 边界表 (tiff_bounds)
 -- 存储 tiff 文件的地理边界，用于 section 验证
 -- ========================================
 CREATE TABLE IF NOT EXISTS tiff_bounds (
