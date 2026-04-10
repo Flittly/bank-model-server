@@ -86,7 +86,7 @@ ALTER TABLE cross_sections
 ADD COLUMN IF NOT EXISTS validation_message TEXT;
 
 ALTER TABLE cross_sections
-ADD COLUMN IF NOT EXISTS vertical_foot_points JSONB;
+ADD COLUMN IF NOT EXISTS vertical_foot_point JSONB;
 
 -- 创建 tiff_bounds 表
 CREATE TABLE IF NOT EXISTS tiff_bounds (

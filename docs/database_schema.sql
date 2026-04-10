@@ -200,7 +200,7 @@ CREATE TABLE IF NOT EXISTS cross_sections (
     section_geometry JSONB,
 
     -- 垂直脚点（用于前端展示,GeoJSON Point）
-    vertical_foot_points JSONB,
+    vertical_foot_point JSONB,
 
     -- 距离参数（用于前端显示）
     distance NUMERIC,
