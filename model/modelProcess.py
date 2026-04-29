@@ -104,7 +104,7 @@ def daemon_process(process_queue: queue.Queue[any]):
                 break
             current_status = mcr.get_status()
             if (current_status & config.STATUS_ERROR) == config.STATUS_ERROR:
-                error_log = MCR.get_simplified_error_log(core_mcr_id)
+                error_log = MCR.get_simplified_error_log(id)
                 core_mcr = MCR.open_case(core_mcr_id)
                 if core_mcr is not None:
                     core_mcr.set_runtime(

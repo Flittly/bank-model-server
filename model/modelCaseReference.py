@@ -14,6 +14,84 @@ import util
 
 class ModelCaseReference:
     @staticmethod
+    def _extract_runtime_error(runtime: dict[str, Any] | None) -> str | None:
+        if not isinstance(runtime, dict):
+            return None
+
+        meta = runtime.get("meta")
+        if isinstance(meta, dict):
+            traceback_text = meta.get("traceback")
+            if isinstance(traceback_text, str) and traceback_text.strip():
+                lines = [line.strip() for line in traceback_text.splitlines() if line.strip()]
+                if lines:
+                    return lines[-1]
+
+            dependency_error = meta.get("dependency-error")
+            if isinstance(dependency_error, str) and dependency_error.strip():
+                return dependency_error.strip()
+
+        message = runtime.get("message")
+        status = str(runtime.get("status", "")).lower()
+        if (
+            isinstance(message, str)
+            and message.strip()
+            and status in {"error", "failed", "failure"}
+        ):
+            return message.strip()
+
+        return None
+
+    @staticmethod
+    def _extract_event_error(events: list[dict[str, Any]] | None) -> str | None:
+        if not isinstance(events, list):
+            return None
+
+        for event in reversed(events):
+            if not isinstance(event, dict):
+                continue
+            level = str(event.get("level", "")).lower()
+            if level != "error":
+                continue
+
+            meta = event.get("meta")
+            if isinstance(meta, dict):
+                traceback_text = meta.get("traceback")
+                if isinstance(traceback_text, str) and traceback_text.strip():
+                    lines = [line.strip() for line in traceback_text.splitlines() if line.strip()]
+                    if lines:
+                        return lines[-1]
+
+            message = event.get("message")
+            if isinstance(message, str) and message.strip():
+                return message.strip()
+
+        return None
+
+    @staticmethod
+    def _is_case_chain(text: str) -> bool:
+        parts = [item for item in text.split("-") if item]
+        if len(parts) < 2:
+            return False
+        return all(len(item) == 32 and all(ch in "0123456789abcdef" for ch in item) for item in parts)
+
+    @staticmethod
+    def _summarize_dependency_chain(case_chain: str) -> str | None:
+        summaries: list[str] = []
+        for case_id in [item for item in case_chain.split("-") if item]:
+            runtime = ModelCaseReference.get_runtime_info(case_id)
+            runtime_error = ModelCaseReference._extract_runtime_error(runtime)
+            events_error = ModelCaseReference._extract_event_error(
+                ModelCaseReference.get_case_events(case_id)
+            )
+            detail = runtime_error or events_error
+            if detail:
+                summaries.append(f"{case_id}: {detail}")
+
+        if not summaries:
+            return None
+        return " | ".join(summaries)
+
+    @staticmethod
     def _case_lock_path(case_id: str) -> str:
         return os.path.join(config.DIR_MODEL_CASE, case_id, "lock")
 
@@ -210,10 +288,29 @@ class ModelCaseReference:
 
     @staticmethod
     def get_simplified_error_log(case_id: str) -> str:
-        return (
-            ModelCaseReference.get_status_log(case_id)
-            or "Unknown model execution error"
+        runtime_error = ModelCaseReference._extract_runtime_error(
+            ModelCaseReference.get_runtime_info(case_id)
         )
+        if runtime_error:
+            return runtime_error
+
+        event_error = ModelCaseReference._extract_event_error(
+            ModelCaseReference.get_case_events(case_id)
+        )
+        if event_error:
+            return event_error
+
+        status_log = ModelCaseReference.get_status_log(case_id)
+        if status_log:
+            status_log = status_log.strip()
+            if status_log and status_log != "OK":
+                if ModelCaseReference._is_case_chain(status_log):
+                    chain_summary = ModelCaseReference._summarize_dependency_chain(status_log)
+                    if chain_summary:
+                        return chain_summary
+                return status_log
+
+        return "Unknown model execution error"
 
     @staticmethod
     def get_pre_error_cases(case_id: str) -> list[str]:

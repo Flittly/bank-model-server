@@ -339,8 +339,17 @@ def section_view(dem_path, section_geometry, output_path):
     )
 
     # Calculate the points and their heigh that the erosion model focuses
+    if len(scatters) < 2:
+        raise SystemError("Section scatter points are insufficient")
+
+    verified_end_index = deepest_index
+    if verified_end_index <= 0:
+        verified_end_index = 1
+    elif verified_end_index >= len(scatters):
+        verified_end_index = len(scatters) - 1
+
     er_point_coords_verified, step_er_verified = util.divide_point_line(
-        scatters, 23, dataset.GetProjection(), deepest_index
+        scatters, 23, dataset.GetProjection(), verified_end_index
     )
     er_point_coords, step_er = util.divide_point_line(
         scatters, 23, dataset.GetProjection()
