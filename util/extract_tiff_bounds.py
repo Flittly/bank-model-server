@@ -54,7 +54,7 @@ def extract_all_tiff_bounds():
                         min_y=bounds["min_y"],
                         max_x=bounds["max_x"],
                         max_y=bounds["max_y"],
-                        geom_wkt=bounds["geom_wkt"],
+                        srid=bounds.get("srid", 3857),
                     )
                     count += 1
                     print(

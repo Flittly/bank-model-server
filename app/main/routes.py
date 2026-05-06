@@ -412,6 +412,46 @@ async def extract_tiff_bounds_api(request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@api_router.post("/api/v1/tiff/register")
+async def register_tiff_api(
+    file: UploadFile = File(...),
+    segment: str = Form(...),
+    year: str = Form(...),
+    timepoint: str = Form(...),
+) -> dict[str, Any]:
+    """上传 tiff 文件，自动提取边界并同步到 RustFS"""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="File is required")
+    if not segment or not year or not timepoint:
+        raise HTTPException(status_code=400, detail="segment, year, timepoint are required")
+
+    try:
+        content = await file.read()
+        result = controllers.register_tiff(
+            file_content=content,
+            original_filename=file.filename,
+            segment=segment,
+            year=year,
+            timepoint=timepoint,
+        )
+        return {"success": True, **result}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@api_router.delete("/api/v1/tiff/register")
+async def delete_tiff_api(tiff_key: str = Query(..., description="tiff 资源键")) -> dict[str, Any]:
+    """删除 tiff 文件、tiff_bounds 记录及 RustFS 对象"""
+    if not tiff_key:
+        raise HTTPException(status_code=400, detail="Missing tiff_key")
+
+    try:
+        result = controllers.delete_tiff_resource(tiff_key)
+        return {"success": True, **result}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @api_router.get(f"{config.API_VERSION}" + "/{category}/{model_name}")
 async def get_model_runner(
     category: str, model_name: str, request: Request

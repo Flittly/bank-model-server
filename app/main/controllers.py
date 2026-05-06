@@ -273,6 +273,137 @@ def get_bank_result(section_id: str) -> dict[str, Any]:
     return task_service.get_bank_result(section_id)
 
 
+def register_tiff(
+    file_content: bytes,
+    original_filename: str,
+    segment: str,
+    year: str,
+    timepoint: str,
+) -> dict[str, Any]:
+    import os
+    from util.rustfs import (
+        extract_tiff_bounds,
+        rustfs_configured,
+        get_rustfs_client,
+        get_rustfs_bucket,
+        get_remote_object_key,
+    )
+    from util.db_ops import save_tiff_bounds
+
+    set_name = "standard"
+    dest_dir = os.path.join(
+        config.DIR_RESOURCE_TIFF, segment, year, set_name, timepoint
+    )
+    os.makedirs(dest_dir, exist_ok=True)
+
+    # dedup: 2021.tiff → 2021(1).tiff
+    base, ext = os.path.splitext(original_filename)
+    final_name = original_filename
+    counter = 1
+    while os.path.exists(os.path.join(dest_dir, final_name)):
+        final_name = f"{base}({counter}){ext}"
+        counter += 1
+
+    tiff_path = os.path.join(dest_dir, final_name)
+    with open(tiff_path, "wb") as f:
+        f.write(file_content)
+
+    tiff_key = os.path.relpath(tiff_path, config.DIR_RESOURCE).replace("\\", "/")
+
+    rustfs_synced = False
+    if rustfs_configured():
+        try:
+            client = get_rustfs_client()
+            bucket = get_rustfs_bucket()
+            remote_key = get_remote_object_key(tiff_key)
+            client.upload_file(
+                tiff_path,
+                bucket,
+                remote_key,
+                ExtraArgs={"ContentType": "image/tiff"},
+            )
+            rustfs_synced = True
+        except Exception as exc:
+            print(f"[tiff-register] RustFS upload failed: {exc}", flush=True)
+
+    bounds = extract_tiff_bounds(tiff_path)
+    save_tiff_bounds(
+        tiff_key=tiff_key,
+        region_code=segment,
+        year=year,
+        timepoint=timepoint,
+        min_x=bounds["min_x"],
+        min_y=bounds["min_y"],
+        max_x=bounds["max_x"],
+        max_y=bounds["max_y"],
+        srid=bounds.get("srid", 3857),
+    )
+
+    return {
+        "tiff_key": tiff_key,
+        "file_name": final_name,
+        "min_x": bounds["min_x"],
+        "min_y": bounds["min_y"],
+        "max_x": bounds["max_x"],
+        "max_y": bounds["max_y"],
+        "rustfs_synced": rustfs_synced,
+    }
+
+
+def delete_tiff_resource(tiff_key: str) -> dict[str, Any]:
+    import os
+    import shutil
+    from urllib.parse import unquote
+    from util.db import get_db_cursor
+    from util.rustfs import (
+        rustfs_configured,
+        get_rustfs_client,
+        get_rustfs_bucket,
+        get_remote_object_key,
+        get_local_resource_path,
+    )
+
+    tiff_key = unquote(tiff_key)
+    local_path = get_local_resource_path(tiff_key)
+    print(f"[tiff-delete] tiff_key={tiff_key} local_path={local_path}", flush=True)
+
+    if os.path.isfile(local_path):
+        os.remove(local_path)
+        print(f"[tiff-delete] file removed: {local_path}", flush=True)
+    else:
+        print(f"[tiff-delete] file not found at: {local_path}", flush=True)
+        raise FileNotFoundError(f"TIFF file not found: {local_path}")
+
+    parent_dir = os.path.dirname(local_path)
+    if os.path.isdir(parent_dir) and not os.listdir(parent_dir):
+        shutil.rmtree(parent_dir)
+        print(f"[tiff-delete] empty directory removed: {parent_dir}", flush=True)
+
+    rustfs_deleted = False
+    if rustfs_configured():
+        try:
+            client = get_rustfs_client()
+            bucket = get_rustfs_bucket()
+            remote_key = get_remote_object_key(tiff_key)
+            client.delete_object(Bucket=bucket, Key=remote_key)
+            rustfs_deleted = True
+        except Exception as exc:
+            print(f"[tiff-delete] RustFS delete failed: {exc}", flush=True)
+
+    with get_db_cursor() as (conn, cursor):
+        cursor.execute(
+            "DELETE FROM tiff_bounds WHERE tiff_key = %s",
+            (tiff_key,),
+        )
+        conn.commit()
+
+    return {
+        "tiff_key": tiff_key,
+        "rustfs_deleted": rustfs_deleted,
+        "deleted": True,
+    }
+
+
 def extract_tiff_bounds(tiff_key: str) -> dict[str, Any]:
     """提取 tiff 文件边界并存储到数据库"""
     from util.rustfs import resolve_tiff_path, extract_tiff_bounds
