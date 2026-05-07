@@ -115,37 +115,55 @@ def get_risk_level(response_list, wRE, wNM, wGE, wRL, risk_threshold):
     water_level_fluctuation_response = response_list[8]
 
     with open(soil_composition_response, "r", encoding="utf-8") as file:
+        soil_composition_data = json.load(file)
         soil_composition_risk_level_matrix = np.array(
-            [json.load(file).get("risk-level")]
+            [soil_composition_data.get("risk-level")]
         )
+        raw_Dsed = soil_composition_data.get("Dsed")
     with open(slope_protection_response, "r", encoding="utf-8") as file:
+        slope_protection_data = json.load(file)
         slope_protection_risk_level_matrix = np.array(
-            [json.load(file).get("risk-level")]
+            [slope_protection_data.get("risk-level")]
         )
+        raw_PL = slope_protection_data.get("PL")
     with open(load_control_mcr_response, "r", encoding="utf-8") as file:
-        load_control_risk_level_matrix = np.array([json.load(file).get("risk-level")])
+        load_control_data = json.load(file)
+        load_control_risk_level_matrix = np.array([load_control_data.get("risk-level")])
+        raw_LC = load_control_data.get("LC")
     with open(height_difference_response, "r", encoding="utf-8") as file:
+        height_difference_data = json.load(file)
         height_difference_risk_level_matrix = np.array(
-            [json.load(file).get("risk-level")]
+            [height_difference_data.get("risk-level")]
         )
+        raw_Zb = height_difference_data.get("Zb")
     with open(slope_rate_response, "r", encoding="utf-8") as file:
-        slope_rate_risk_level_matrix = np.array([json.load(file).get("risk-level")])
+        slope_rate_data = json.load(file)
+        slope_rate_risk_level_matrix = np.array([slope_rate_data.get("risk-level")])
+        raw_Sa = slope_rate_data.get("Sa")
     with open(nearshore_flush_mcr_response, "r", encoding="utf-8") as file:
+        nearshore_flush_data = json.load(file)
         nearshore_flush_risk_level_matrix = np.array(
-            [json.load(file).get("risk-level")]
+            [nearshore_flush_data.get("risk-level")]
         )
+        raw_Ln = nearshore_flush_data.get("Ln")
     with open(flow_equivalent_mcr_response, "r", encoding="utf-8") as file:
+        flow_equivalent_data = json.load(file)
         flow_equivalent_risk_level_matrix = np.array(
-            [json.load(file).get("risk-level")]
+            [flow_equivalent_data.get("risk-level")]
         )
+        raw_PQ = flow_equivalent_data.get("PQ")
     with open(anti_impact_speed_response, "r", encoding="utf-8") as file:
+        anti_impact_speed_data = json.load(file)
         anti_impact_speed_risk_level_matrix = np.array(
-            [json.load(file).get("risk-level")]
+            [anti_impact_speed_data.get("risk-level")]
         )
+        raw_Ky = anti_impact_speed_data.get("Ky")
     with open(water_level_fluctuation_response, "r", encoding="utf-8") as file:
+        water_level_fluctuation_data = json.load(file)
         water_level_fluctuation_risk_level_matrix = np.array(
-            [json.load(file).get("risk-level")]
+            [water_level_fluctuation_data.get("risk-level")]
         )
+        raw_Zd = water_level_fluctuation_data.get("Zd")
 
     # matrix transpose
     soil_composition_risk_level_matrix_T = soil_composition_risk_level_matrix.T
@@ -240,7 +258,19 @@ def get_risk_level(response_list, wRE, wNM, wGE, wRL, risk_threshold):
         "risk_value_components": [result_matrix[2][0], result_matrix[3][0]],
     }
 
-    return risk_value[0], risk, matrices
+    raw_values = {
+        "Dsed": raw_Dsed,
+        "PL": raw_PL,
+        "LC": raw_LC,
+        "Zb": raw_Zb,
+        "Sa": raw_Sa,
+        "Ln": raw_Ln,
+        "PQ": raw_PQ,
+        "Ky": raw_Ky,
+        "Zd": raw_Zd,
+    }
+
+    return risk_value[0], risk, matrices, raw_values
 
 
 ##########################################################################################
@@ -301,9 +331,12 @@ def run_risk_level_mcr(mcr: model.ModelCaseReference):
     if not mcr.request_json["wRL"] == "NONE":
         wRL = mcr.request_json["wRL"]
 
-    result, risk_level, matrices = get_risk_level(
+    result, risk_level, matrices, raw_values = get_risk_level(
         response_list, wRE, wNM, wGE, wRL, risk_threshold
     )
+
+    input_thresholds = mcr.request_json.get("risk-thresholds")
+    resolved_sub = input_thresholds if isinstance(input_thresholds, dict) else None
 
     return {
         "case-id": mcr.id,
@@ -321,6 +354,15 @@ def run_risk_level_mcr(mcr: model.ModelCaseReference):
         "result": result,
         "risk-level": risk_level,
         "matrices": matrices,
+        "raw_values": raw_values,
+        "thresholds": {
+            "risk_threshold": risk_threshold if risk_threshold != "NONE" else None,
+            "wRE": wRE if wRE != "NONE" else None,
+            "wNM": wNM if wNM != "NONE" else None,
+            "wGE": wGE if wGE != "NONE" else None,
+            "wRL": wRL if wRL != "NONE" else None,
+            "sub_thresholds": resolved_sub,
+        },
     }
 
 
