@@ -111,6 +111,21 @@ CREATE INDEX IF NOT EXISTS idx_tiff_bounds_geom ON tiff_bounds USING GIST(geom);
 -- 添加 banks 表的 reversed 字段
 ALTER TABLE banks
 ADD COLUMN IF NOT EXISTS reversed BOOLEAN DEFAULT FALSE;
+
+-- 逻辑删除字段
+ALTER TABLE banks ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP;
+ALTER TABLE cross_sections ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP;
+ALTER TABLE bank_risk_results ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP;
+ALTER TABLE section_profiles ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP;
+ALTER TABLE basic_params ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP;
+
+CREATE INDEX IF NOT EXISTS idx_banks_deleted_at ON banks(deleted_at) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_tasks_deleted_at ON tasks(deleted_at) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_cross_sections_deleted_at ON cross_sections(deleted_at) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_bank_risk_results_deleted_at ON bank_risk_results(deleted_at) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_section_profiles_deleted_at ON section_profiles(deleted_at) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_basic_params_deleted_at ON basic_params(deleted_at) WHERE deleted_at IS NULL;
 """
 
 
