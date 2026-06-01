@@ -179,11 +179,14 @@ def generate_risk_distribution_map(
                          (dem_lats[-1] <= lat_min <= dem_lats[0]) and (dem_lats[-1] <= lat_max <= dem_lats[0])
             print(f"[viz] DEM covers risk data: {dem_covers}", flush=True)
             
-            # 绘制 DEM 底图
+            # 绘制 DEM 底图（灰度，增强对比度）
+            vmin = np.nanpercentile(dem_data, 2)
+            vmax = np.nanpercentile(dem_data, 98)
             ax.imshow(
                 dem_data,
                 extent=[dem_lngs[0], dem_lngs[-1], dem_lats[-1], dem_lats[0]],
-                cmap='terrain',
+                cmap='gray',
+                vmin=vmin, vmax=vmax,
                 alpha=0.6,
                 aspect='auto',
                 zorder=0
