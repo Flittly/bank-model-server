@@ -258,32 +258,17 @@ def generate_risk_distribution_map(
         bbox_to_anchor=(0.01, 0.99)
     )
     
-    # 添加统计信息（右下角）
+    # 统计各等级数量（用于返回描述）
     risk_counts = {}
     for s in sections:
         level = s.get('risk_level', 1)
         risk_counts[level] = risk_counts.get(level, 0) + 1
     
-    stats_text = f"断面总数: {len(sections)}\n"
-    for level in sorted(RISK_LABELS.keys()):
-        count = risk_counts.get(level, 0)
-        if count > 0:
-            stats_text += f"{RISK_LABELS[level]}: {count}\n"
-    
-    ax.text(
-        0.98, 0.02, stats_text,
-        transform=ax.transAxes,
-        fontsize=9,
-        verticalalignment='bottom',
-        horizontalalignment='right',
-        bbox=dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray')
-    )
-    
     # 添加比例尺（左下角）
     add_scale_bar(ax, lng_min, lng_max, lat_min, lat_max)
     
-    # 添加指北针（右上角，在图例下方）
-    add_north_arrow(ax, x=0.95, y=0.25)
+    # 添加指北针（右上角）
+    add_north_arrow(ax, x=0.95, y=0.90)
     
     # 添加边框
     for spine in ax.spines.values():
