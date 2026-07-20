@@ -183,14 +183,19 @@ def import_single_flow_optimized(
 
         inserted_point_ids = []
         with db.get_db_cursor() as (conn, cursor):
+            # 获取 admin 用户的 ID
+            cursor.execute("SELECT id FROM users WHERE username = 'admin'")
+            admin_row = cursor.fetchone()
+            admin_id = admin_row[0] if admin_row else 1
+
             for pr in point_records:
                 try:
                     cursor.execute(
                         """
                         INSERT INTO hydrodynamic_points (
-                            point_id, region_code, set_name, water_qs, tidal_level, temp, x, y, geom
+                            point_id, region_code, set_name, water_qs, tidal_level, temp, x, y, geom, user_id
                         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
-                            ST_SetSRID(ST_MakePoint(%s, %s), 4326)
+                            ST_Transform(ST_SetSRID(ST_MakePoint(%s, %s), 32650), 4326), %s
                         )
                         ON CONFLICT (point_id) DO NOTHING
                         RETURNING id
@@ -206,6 +211,7 @@ def import_single_flow_optimized(
                             pr["y"],
                             pr["x"],
                             pr["y"],
+                            admin_id,
                         ),
                     )
                     result = cursor.fetchone()
@@ -271,24 +277,32 @@ def import_single_flow_optimized(
 
                 if len(data_batch) >= BATCH_SIZE:
                     with db.get_db_cursor() as (conn, cursor):
+                        cursor.execute("SELECT id FROM users WHERE username = 'admin'")
+                        admin_row = cursor.fetchone()
+                        uid = admin_row[0] if admin_row else 1
+
                         cursor.executemany(
                             """
-                            INSERT INTO hydrodynamic_data (point_id, time_step, h, p, u, v)
-                            VALUES (%s, %s, %s, %s, %s, %s)
+                            INSERT INTO hydrodynamic_data (point_id, time_step, h, p, u, v, user_id)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
                             """,
-                            data_batch,
+                            [(pid, ts, h, p, u, v, uid) for pid, ts, h, p, u, v in data_batch],
                         )
                     data_inserted += len(data_batch)
                     data_batch = []
 
         if data_batch:
             with db.get_db_cursor() as (conn, cursor):
+                cursor.execute("SELECT id FROM users WHERE username = 'admin'")
+                admin_row = cursor.fetchone()
+                uid = admin_row[0] if admin_row else 1
+
                 cursor.executemany(
                     """
-                    INSERT INTO hydrodynamic_data (point_id, time_step, h, p, u, v)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                    INSERT INTO hydrodynamic_data (point_id, time_step, h, p, u, v, user_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     """,
-                    data_batch,
+                    [(pid, ts, h, p, u, v, uid) for pid, ts, h, p, u, v in data_batch],
                 )
             data_inserted += len(data_batch)
 

@@ -308,6 +308,7 @@ def delete_risk_results(task_id: str) -> int:
 def create_basic_param(
     param_id: str,
     param_name: str,
+    user_id: Optional[int] = None,
     segment: Optional[str] = None,
     current_timepoint: Optional[str] = None,
     set_name: Optional[str] = None,
@@ -328,17 +329,23 @@ def create_basic_param(
     Create basic parameters for model calculation
     """
     with db.get_db_cursor() as (conn, cursor):
+        # 获取 admin 用户的 ID 作为默认归属
+        if user_id is None:
+            cursor.execute("SELECT id FROM users WHERE username = 'admin'")
+            row = cursor.fetchone()
+            user_id = row[0] if row else 1
+
         cursor.execute(
             """
             INSERT INTO basic_params (
-                param_id, param_name,
+                param_id, param_name, user_id,
                 segment, current_timepoint, set_name, water_qs, tidal_level,
                 bench_id, ref_id,
                 hs, hc, protection_level, control_level,
                 comparison_timepoint,
                 risk_thresholds, weights, other_params
             ) VALUES (
-                %s, %s,
+                %s, %s, %s,
                 %s, %s, %s, %s, %s,
                 %s, %s,
                 %s, %s, %s, %s,
@@ -350,6 +357,7 @@ def create_basic_param(
             (
                 param_id,
                 param_name,
+                user_id,
                 segment,
                 current_timepoint,
                 set_name,
@@ -843,22 +851,28 @@ def create_hydrodynamic_point(
     x: float,
     y: float,
     temp: bool = False,
+    user_id: Optional[int] = None,
 ) -> int:
     """
     Create a hydrodynamic point
     """
     with db.get_db_cursor() as (conn, cursor):
+        if user_id is None:
+            cursor.execute("SELECT id FROM users WHERE username = 'admin'")
+            row = cursor.fetchone()
+            user_id = row[0] if row else 1
+
         cursor.execute(
             """
             INSERT INTO hydrodynamic_points (
-                point_id, region_code, set_name, water_qs, tidal_level, temp, x, y, geom
+                point_id, region_code, set_name, water_qs, tidal_level, temp, x, y, geom, user_id
             ) VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s,
-                ST_SetSRID(ST_MakePoint(%s, %s), 4326)
+                ST_SetSRID(ST_MakePoint(%s, %s), 4326), %s
             )
             RETURNING id
             """,
-            (point_id, region_code, set_name, water_qs, tidal_level, temp, x, y, x, y),
+            (point_id, region_code, set_name, water_qs, tidal_level, temp, x, y, x, y, user_id),
         )
         return cursor.fetchone()[0]
 
@@ -1013,13 +1027,17 @@ def create_hydrodynamic_data(
     Create hydrodynamic data for a point at a specific time step
     """
     with db.get_db_cursor() as (conn, cursor):
+        cursor.execute("SELECT id FROM users WHERE username = 'admin'")
+        row = cursor.fetchone()
+        user_id = row[0] if row else 1
+
         cursor.execute(
             """
-            INSERT INTO hydrodynamic_data (point_id, time_step, h, p, u, v)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            INSERT INTO hydrodynamic_data (point_id, time_step, h, p, u, v, user_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
-            (point_id_db, time_step, h, p, u, v),
+            (point_id_db, time_step, h, p, u, v, user_id),
         )
         return cursor.fetchone()[0]
 
@@ -1132,13 +1150,17 @@ def bulk_create_hydrodynamic_data(data_list: list) -> int:
         return 0
 
     with db.get_db_cursor() as (conn, cursor):
+        cursor.execute("SELECT id FROM users WHERE username = 'admin'")
+        row = cursor.fetchone()
+        user_id = row[0] if row else 1
+
         cursor.executemany(
             """
-            INSERT INTO hydrodynamic_data (point_id, time_step, h, p, u, v)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            INSERT INTO hydrodynamic_data (point_id, time_step, h, p, u, v, user_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             """,
             [
-                (d["point_id_db"], d["time_step"], d["h"], d["p"], d["u"], d["v"])
+                (d["point_id_db"], d["time_step"], d["h"], d["p"], d["u"], d["v"], user_id)
                 for d in data_list
             ],
         )
@@ -1197,6 +1219,7 @@ def save_tiff_bounds(
     max_x: float,
     max_y: float,
     srid: int = 3857,
+    user_id: Optional[int] = None,
 ) -> int:
     """
     保存 TIFF 边界信息到数据库
@@ -1219,13 +1242,17 @@ def save_tiff_bounds(
     geom_wkt = f"POLYGON(({min_x} {min_y}, {max_x} {min_y}, {max_x} {max_y}, {min_x} {max_y}, {min_x} {min_y}))"
 
     with db.get_db_cursor() as (conn, cursor):
-        # 使用 ST_Transform 将原始坐标转换为 4326
+        if user_id is None:
+            cursor.execute("SELECT id FROM users WHERE username = 'admin'")
+            row = cursor.fetchone()
+            user_id = row[0] if row else 1
+
         cursor.execute(
             """
             INSERT INTO tiff_bounds (tiff_key, region_code, year, timepoint,
-                                     min_x, min_y, max_x, max_y, geom)
+                                     min_x, min_y, max_x, max_y, geom, user_id)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 
-                    ST_Transform(ST_SetSRID(ST_GeomFromText(%s), %s), 4326))
+                    ST_Transform(ST_SetSRID(ST_GeomFromText(%s), %s), 4326), %s)
             ON CONFLICT (tiff_key) DO UPDATE SET
                 region_code = EXCLUDED.region_code,
                 year = EXCLUDED.year,
@@ -1235,6 +1262,7 @@ def save_tiff_bounds(
                 max_x = EXCLUDED.max_x,
                 max_y = EXCLUDED.max_y,
                 geom = EXCLUDED.geom,
+                user_id = EXCLUDED.user_id,
                 updated_at = CURRENT_TIMESTAMP
             RETURNING id
             """,
@@ -1249,6 +1277,7 @@ def save_tiff_bounds(
                 max_y,
                 geom_wkt,
                 srid,
+                user_id,
             ),
         )
         result = cursor.fetchone()

@@ -447,3 +447,28 @@ DROP TRIGGER IF EXISTS trigger_tiff_bounds_updated_at ON tiff_bounds;
 CREATE TRIGGER trigger_tiff_bounds_updated_at
 BEFORE UPDATE ON tiff_bounds
 FOR EACH ROW EXECUTE FUNCTION update_tiff_bounds_updated_at();
+
+-- ========================================
+-- 10. AI 聊天会话管理表 (ai_chat_sessions)
+-- ========================================
+CREATE TABLE IF NOT EXISTS ai_chat_sessions (
+    id SERIAL PRIMARY KEY,
+    session_id VARCHAR(64) UNIQUE NOT NULL,
+    title VARCHAR(200) DEFAULT '新会话',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+
+-- AI ģ�����ñ�
+CREATE TABLE IF NOT EXISTS ai_models (
+    id SERIAL PRIMARY KEY,
+    model_key VARCHAR(100) UNIQUE NOT NULL,
+    label VARCHAR(200) NOT NULL,
+    api_key VARCHAR(500) NOT NULL,
+    base_url VARCHAR(500) NOT NULL,
+    model_name VARCHAR(200) NOT NULL,
+    is_default BOOLEAN DEFAULT false,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
