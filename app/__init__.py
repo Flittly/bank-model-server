@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Bank Model Service",
-        description="Yangtze bank-collapse risk model service",
+        description="YRBC-IRAP model service",
         version="1.0.0",
     )
 

@@ -1,6 +1,6 @@
-# Yangtze Bank-Collapse Model Service
+# YRBC-IRAP Model Service
 
-`bank_model_server` remains the Python model service for the Yangtze bank-collapse risk assessment system.
+`bank_model_server` is the Python model service of YRBC-IRAP (Yangtze River Bank Collapse Key Hazard Section Intelligent Risk Assessment Platform).
 
 ## Responsibilities
 
