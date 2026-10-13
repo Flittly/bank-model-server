@@ -554,6 +554,14 @@ def extract_tiff_bounds(tiff_path: str) -> dict:
         dataset = None
 
 
+# TODO(冗余审计 2026-10-12 / 2026-10-13 更正): 本函数当前零调用方，它是一条
+#  「读不到就提取并落库」的自愈兜底路径。
+#  注意：**它并不是 tiff_bounds 的唯一写入方**（上一版审计结论有误，已更正）。
+#  真正在跑的写入路径有三条，都调用 db_ops.save_tiff_bounds()：
+#    1) controllers.register_tiff()        —— POST /api/v1/tiff/register（前端上传 TIFF）
+#    2) controllers.extract_tiff_bounds()  —— POST /api/v1/tiff/extract-bounds（Java 校验时按需调）
+#    3) util/extract_tiff_bounds.py        —— 手工批量脚本
+#  本函数只是可用于替换上述逻辑的兜底实现，目前无调用方，保留待接线。
 def get_or_extract_tiff_bounds(
     tiff_key: str, segment: str = None, timepoint: str = None
 ) -> dict:

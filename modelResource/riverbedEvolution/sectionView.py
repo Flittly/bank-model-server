@@ -11,7 +11,6 @@ from osgeo import gdal, osr
 import util
 import model
 import config
-from math import sqrt
 import copy
 import numpy as np
 from util.rustfs import resolve_tiff_path
@@ -66,10 +65,6 @@ def _geometry_debug_info(geometry):
         "crs": properties.get("name"),
         "has_features": bool(geometry.get("features")),
     }
-
-
-def euclidean_distance(point1, point2):
-    return sqrt((point1[0] - point2[0]) ** 2 + (point1[1] - point2[1]) ** 2)
 
 
 # specific crs change process

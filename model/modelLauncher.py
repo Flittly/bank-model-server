@@ -136,38 +136,6 @@ def compile_model_script_to_pyc(model_api: str, script_path: str):
     )
 
 
-def compile_model_script(model_name: str, script_path: str):
-    code_md5 = util.generate_md5(model_name)
-    compiled_path = os.path.join(config.DIR_RESOURCE_MODEL, code_md5)
-
-    if os.path.exists(compiled_path):
-        try:
-            with open(
-                os.path.join(compiled_path, "time.txt"), "r", encoding="utf-8"
-            ) as file:
-                program_modified_time = float(file.readline())
-                script_modified_time = os.path.getmtime(script_path)
-                if program_modified_time == script_modified_time:
-                    return
-        except FileNotFoundError:
-            pass
-
-    with open(script_path, "r", encoding="utf-8") as file:
-        script = file.read()
-    compiled_code = compile(script, model_name, "exec")
-
-    if not os.path.exists(compiled_path):
-        os.makedirs(compiled_path)
-
-    with open(os.path.join(compiled_path, "program.marshal"), "wb") as file:
-        marshal.dump(compiled_code, file)
-
-    with open(os.path.join(compiled_path, "time.txt"), "w", encoding="utf-8") as file:
-        file.write(str(os.path.getmtime(script_path)))
-
-    print(f"Model Program ({model_name}) Is Compiled", flush=True)
-
-
 def load_code_from_pyc(pyc_path: str):
     with open(pyc_path, "rb") as f:
         f.read(16)  # Skip the .pyc header (timestamp, magic number, etc.)

@@ -6,7 +6,6 @@ import os
 import sys
 import json
 import argparse
-from typing import Optional
 
 # 添加项目路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -88,25 +87,6 @@ def main():
         return
     
     print(result)
-
-
-# Python API 接口
-def generate_risk_map(risk_data: list, title: str = '岸段风险分布图', 
-                      output_dir: Optional[str] = None) -> str:
-    """生成风险分布图"""
-    return generate_risk_distribution_map(risk_data, title, output_dir)
-
-
-def generate_heatmap(grid_data: list, title: str = '冲淤变化热力图',
-                     output_dir: Optional[str] = None) -> str:
-    """生成冲淤热力图"""
-    return generate_scour_heatmap(grid_data, title, output_dir)
-
-
-def generate_section_chart(sections: list, title: str = '断面对比图',
-                          output_dir: Optional[str] = None) -> str:
-    """生成断面对比图"""
-    return generate_section_comparison(sections, title, output_dir)
 
 
 if __name__ == '__main__':

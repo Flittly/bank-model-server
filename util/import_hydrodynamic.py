@@ -30,45 +30,6 @@ def get_temp_flag(item: Path) -> bool:
         return False
 
 
-def parse_single_file_for_point(file_path: Path, point_key: tuple) -> dict:
-    """
-    只解析一个文件中特定坐标点的数据
-    返回: {time_step: (h, p, u, v)}
-    """
-    x_target, y_target = point_key
-    result = {}
-
-    with open(file_path, "r", encoding="utf-8") as f:
-        lines = f.readlines()
-        if len(lines) < 3:
-            return result
-
-        try:
-            time_step = int(file_path.stem)
-        except ValueError:
-            return result
-
-        for line in lines[2:]:
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split()
-            if len(parts) >= 6:
-                try:
-                    x = float(parts[0])
-                    y = float(parts[1])
-                    if abs(x - x_target) < 0.0001 and abs(y - y_target) < 0.0001:
-                        h = float(parts[2])
-                        p = float(parts[3])
-                        u = float(parts[4])
-                        v = float(parts[5])
-                        result[time_step] = (h, p, u, v)
-                        break
-                except (ValueError, IndexError):
-                    continue
-    return result
-
-
 def get_points_from_first_file(raw_dir: Path, max_points: int = 0) -> list:
     """
     从第一个文件中获取所有坐标点列表

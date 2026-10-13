@@ -25,53 +25,6 @@ def floatv(v):
         return 0
     return float(v)
 
-class VBArray:
-    def __init__(self, size, initial_data=None):
-        if isinstance(size, tuple):
-            self.data = np.zeros(size)
-        else:
-            self.data = np.zeros((size,))
-        
-        if initial_data is not None:
-            if isinstance(initial_data[0], list):
-                self.data = np.array(initial_data)
-            else:
-                self.data = np.array(initial_data)
-
-    def __getitem__(self, index):
-        if isinstance(index, tuple):
-            row, col = index
-            return self.data[row-1, col-1]
-        else:
-            return self.data[index-1]
-    
-    def __setitem__(self, index, value):
-        if isinstance(index, tuple):
-            row, col = index
-            self.data[row-1, col-1] = value
-        else:
-            self.data[index-1] = value
-    
-    def max(self):
-        return np.max(self.data)
-    
-    def min(self):
-        return np.min(self.data)
-    
-    def average(self):
-        return np.mean(self.data)
-
-    @property
-    def shape(self):
-        return self.data.shape
-    
-    @property
-    def length(self):
-        if len(self.data.shape) == 1:
-            return self.data.shape[0]
-        elif len(self.data.shape) == 2:
-            return self.data.shape[0], self.data.shape[1]
-
 def flatten_(lst):
     out = list()
     for obj in lst:
