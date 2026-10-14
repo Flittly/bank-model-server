@@ -41,17 +41,17 @@ def get_mapped_tidal_level_and_mapped_water_qs(
 
     # Get all node
     nodes = db_ops.get_available_hydrodynamic_nodes(
-        region_code=segment_name,
+        dataset_domain=segment_name,
         set_name=set_name,
         tidal_level=mapped_tidal_level,
     )
 
     if not nodes:
-        segment_name = "Mzs"
+        segment_name = db_ops.DEFAULT_DOMAIN
         set_name = "standard"
         year = "default"
         nodes = db_ops.get_available_hydrodynamic_nodes(
-            region_code=segment_name,
+            dataset_domain=segment_name,
             set_name=set_name,
             tidal_level=mapped_tidal_level,
         )

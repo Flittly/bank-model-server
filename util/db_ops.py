@@ -8,6 +8,12 @@ from typing import List, Dict, Any, Optional, Tuple
 
 from util import db
 
+# 默认数据集域（dataset_domain）：全江段水动力数据的兜底域。
+# 断面 bench_segment（NJ/YZ/Yangtze）直查落空时，模型统一回退到此域再查。
+# 注意：resource/tiff/{NJ,YZ}/ 与 resource/json/Mzs/ 等磁盘路径里的 "Mzs"/"NJ"/"YZ"
+# 是文件目录名，与数据域无关，不要改。
+DEFAULT_DOMAIN = "Yangtze"
+
 
 # ========================================
 # Bank 相关操作
@@ -96,7 +102,7 @@ def create_basic_param(
     param_id: str,
     param_name: str,
     user_id: Optional[int] = None,
-    segment: Optional[str] = None,
+    bench_segment: Optional[str] = None,
     current_timepoint: Optional[str] = None,
     set_name: Optional[str] = None,
     water_qs: Optional[str] = None,
@@ -126,7 +132,7 @@ def create_basic_param(
             """
             INSERT INTO basic_params (
                 param_id, param_name, user_id,
-                segment, current_timepoint, set_name, water_qs, tidal_level,
+                bench_segment, current_timepoint, set_name, water_qs, tidal_level,
                 bench_id, ref_id,
                 hs, hc, protection_level, control_level,
                 comparison_timepoint,
@@ -145,7 +151,7 @@ def create_basic_param(
                 param_id,
                 param_name,
                 user_id,
-                segment,
+                bench_segment,
                 current_timepoint,
                 set_name,
                 water_qs,
@@ -341,7 +347,7 @@ def get_bank_risk_result(section_id: str) -> Optional[Dict[str, Any]]:
 
 
 def get_hydrodynamic_points(
-    region_code: Optional[str] = None,
+    dataset_domain: Optional[str] = None,
     set_name: Optional[str] = None,
     water_qs: Optional[str] = None,
     tidal_level: Optional[str] = None,
@@ -360,9 +366,9 @@ def get_hydrodynamic_points(
         params = []
 
         conditions = []
-        if region_code is not None:
-            conditions.append("hp.region_code = %s")
-            params.append(region_code)
+        if dataset_domain is not None:
+            conditions.append("hp.dataset_domain = %s")
+            params.append(dataset_domain)
         if set_name is not None:
             conditions.append("hp.set_name = %s")
             params.append(set_name)
@@ -386,7 +392,7 @@ def get_hydrodynamic_points(
 
 
 def get_available_hydrodynamic_nodes(
-    region_code: str,
+    dataset_domain: str,
     set_name: str,
     tidal_level: str,
 ) -> List[int]:
@@ -398,19 +404,19 @@ def get_available_hydrodynamic_nodes(
             """
             SELECT DISTINCT water_qs
             FROM hydrodynamic_points
-            WHERE region_code = %s
+            WHERE dataset_domain = %s
               AND set_name = %s
               AND tidal_level = %s
               AND temp = FALSE
             """,
-            (region_code, set_name, tidal_level),
+            (dataset_domain, set_name, tidal_level),
         )
         rows = cursor.fetchall()
         return sorted((int(row["water_qs"]) for row in rows))
 
 
 def get_nearest_hydrodynamic_point(
-    region_code: str,
+    dataset_domain: str,
     set_name: str,
     water_qs: str,
     tidal_level: str,
@@ -428,7 +434,7 @@ def get_nearest_hydrodynamic_point(
                 ST_AsGeoJSON(hp.geom)::jsonb as geometry,
                 ((hp.x - %s) * (hp.x - %s) + (hp.y - %s) * (hp.y - %s)) AS distance_sq
             FROM hydrodynamic_points hp
-            WHERE hp.region_code = %s
+            WHERE hp.dataset_domain = %s
               AND hp.set_name = %s
               AND hp.water_qs = %s
               AND hp.tidal_level = %s
@@ -436,7 +442,7 @@ def get_nearest_hydrodynamic_point(
             ORDER BY distance_sq ASC, hp.id ASC
             LIMIT 1
             """,
-            (x, x, y, y, region_code, set_name, water_qs, tidal_level),
+            (x, x, y, y, dataset_domain, set_name, water_qs, tidal_level),
         )
         result = cursor.fetchone()
         return result if result else None

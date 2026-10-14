@@ -68,7 +68,7 @@ def get_points_from_first_file(raw_dir: Path, max_points: int = 0) -> list:
 def import_single_flow_optimized(
     hydro_path: Path,
     flow_level: str,
-    region_code: str,
+    dataset_domain: str,
     set_name: str,
     max_points: int = 0,
 ):
@@ -120,12 +120,12 @@ def import_single_flow_optimized(
 
         for idx, (x, y) in enumerate(points):
             point_id = (
-                f"HYDRO_{region_code}_{set_name}_{flow_level}_{dir_name[-2:]}_{x}_{y}"
+                f"HYDRO_{dataset_domain}_{set_name}_{flow_level}_{dir_name[-2:]}_{x}_{y}"
             )
             point_records.append(
                 {
                     "point_id": point_id,
-                    "region_code": region_code,
+                    "dataset_domain": dataset_domain,
                     "set_name": set_name,
                     "water_qs": flow_level,
                     "tidal_level": dir_name[-2:],
@@ -154,7 +154,7 @@ def import_single_flow_optimized(
                     cursor.execute(
                         """
                         INSERT INTO hydrodynamic_points (
-                            point_id, region_code, set_name, water_qs, tidal_level, temp, x, y, geom, user_id
+                            point_id, dataset_domain, set_name, water_qs, tidal_level, temp, x, y, geom, user_id
                         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
                             ST_Transform(ST_SetSRID(ST_MakePoint(%s, %s), 32650), 4326), %s
                         )
@@ -163,7 +163,7 @@ def import_single_flow_optimized(
                         """,
                         (
                             pr["point_id"],
-                            pr["region_code"],
+                            pr["dataset_domain"],
                             pr["set_name"],
                             pr["water_qs"],
                             pr["tidal_level"],
@@ -291,11 +291,11 @@ def import_hydrodynamic_data():
     print("水动力数据导入工具 - 高性能版")
     print("=" * 60)
 
-    region_code = "Mzs"
+    dataset_domain = "Mzs"
     set_name = "standard"
 
     hydro_path = (
-        Path(config.DIR_RESOURCE) / "hydrodynamic" / region_code / "default" / set_name
+        Path(config.DIR_RESOURCE) / "hydrodynamic" / dataset_domain / "default" / set_name
     )
     print(f"\n扫描目录: {hydro_path}")
 
@@ -373,7 +373,7 @@ def import_hydrodynamic_data():
 
     for flow in selected_flows:
         points, data = import_single_flow_optimized(
-            hydro_path, flow, region_code, set_name, max_points
+            hydro_path, flow, dataset_domain, set_name, max_points
         )
         total_points += points
         total_data += data
@@ -394,12 +394,12 @@ def list_imported_hydrodynamic_data():
     print("已导入的水动力数据统计")
     print("=" * 60)
 
-    region_code = "Mzs"
+    dataset_domain = db_ops.DEFAULT_DOMAIN
     set_name = "standard"
 
     from util import db_ops
 
-    points = db_ops.get_hydrodynamic_points(region_code=region_code, set_name=set_name)
+    points = db_ops.get_hydrodynamic_points(dataset_domain=dataset_domain, set_name=set_name)
 
     if not points:
         print("没有找到已导入的水动力数据")

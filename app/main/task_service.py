@@ -45,7 +45,7 @@ def _build_risk_payload(section: dict[str, Any]) -> dict[str, Any]:
     risk_thresholds = section.get("risk_thresholds") or "NONE"
 
     payload = {
-        "segment": section.get("segment") or section.get("region_code") or "Mzs",
+        "segment": section.get("bench_segment") or section.get("region_code") or db_ops.DEFAULT_DOMAIN,
         "set": section.get("set_name") or "standard",
         "current-timepoint": _normalize_timepoint(section.get("current_timepoint")),
         "comparison-timepoint": _normalize_timepoint(

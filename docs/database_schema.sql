@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS banks (
     id SERIAL PRIMARY KEY,
     bank_id VARCHAR(100) UNIQUE NOT NULL,
     bank_name VARCHAR(100) NOT NULL,
-    region_code VARCHAR(50) NOT NULL,
+    reach_group VARCHAR(50) NOT NULL,
     
     -- 几何数据
     start_point GEOMETRY(Point, 4326),
@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS banks (
 );
 
 CREATE INDEX IF NOT EXISTS idx_banks_id ON banks(bank_id);
-CREATE INDEX IF NOT EXISTS idx_banks_region ON banks(region_code);
+CREATE INDEX IF NOT EXISTS idx_banks_region ON banks(reach_group);
 CREATE INDEX IF NOT EXISTS idx_banks_geom ON banks USING GIST(geom);
 
 CREATE OR REPLACE FUNCTION update_banks_updated_at()
@@ -129,7 +129,7 @@ CREATE TABLE IF NOT EXISTS basic_params (
     param_name VARCHAR(100) NOT NULL,
     
     -- 基础参数
-    segment VARCHAR(50),
+    bench_segment VARCHAR(50),
     current_timepoint VARCHAR(20),
     set_name VARCHAR(50),
     water_qs VARCHAR(20),
@@ -210,7 +210,7 @@ CREATE TABLE IF NOT EXISTS cross_sections (
     
     -- 基础参数（每个section独立存储）
     param_name VARCHAR(100),
-    segment VARCHAR(50),
+    bench_segment VARCHAR(50),
     current_timepoint VARCHAR(20),
     set_name VARCHAR(50),
     water_qs VARCHAR(20),
@@ -349,7 +349,7 @@ FOR EACH ROW EXECUTE FUNCTION update_section_profiles_updated_at();
 CREATE TABLE IF NOT EXISTS hydrodynamic_points (
     id SERIAL PRIMARY KEY,
     point_id VARCHAR(100) UNIQUE NOT NULL,
-    region_code VARCHAR(50) NOT NULL,
+    dataset_domain VARCHAR(50) NOT NULL,
     set_name VARCHAR(50) NOT NULL,
     water_qs VARCHAR(20) NOT NULL,
     tidal_level VARCHAR(20) NOT NULL,
@@ -365,7 +365,7 @@ CREATE TABLE IF NOT EXISTS hydrodynamic_points (
 );
 
 CREATE INDEX IF NOT EXISTS idx_hydro_points_id ON hydrodynamic_points(point_id);
-CREATE INDEX IF NOT EXISTS idx_hydro_points_region ON hydrodynamic_points(region_code);
+CREATE INDEX IF NOT EXISTS idx_hydro_points_region ON hydrodynamic_points(dataset_domain);
 CREATE INDEX IF NOT EXISTS idx_hydro_points_set ON hydrodynamic_points(set_name);
 CREATE INDEX IF NOT EXISTS idx_hydro_points_water ON hydrodynamic_points(water_qs);
 CREATE INDEX IF NOT EXISTS idx_hydro_points_tidal ON hydrodynamic_points(tidal_level);

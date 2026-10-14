@@ -54,7 +54,7 @@ def get_hydrodynamic_series_by_coordinate(hydrodynamic_mcr, lng, lat):
         lat_prj = _lat
 
     nearest_point = db_ops.get_nearest_hydrodynamic_point(
-        region_code=hydrodynamic_mcr.request_json["segment"],
+        dataset_domain=hydrodynamic_mcr.request_json["segment"],
         set_name=hydrodynamic_mcr.request_json["set"],
         water_qs=hydrodynamic_mcr.request_json["water-qs"],
         tidal_level=hydrodynamic_mcr.request_json["tidal-level"],

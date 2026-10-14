@@ -14,7 +14,7 @@ def test_build_risk_payload_maps_section_fields() -> None:
         "id": 7,
         "section_id": "SEC_001",
         "region_code": "Mzs",
-        "segment": "Mzs",
+        "bench_segment": "Mzs",
         "set_name": "standard",
         "current_timepoint": "202304",
         "comparison_timepoint": "201904",
@@ -45,7 +45,7 @@ def test_build_risk_payload_requires_fields() -> None:
     section = {
         "id": 8,
         "section_id": "SEC_002",
-        "segment": "Mzs",
+        "bench_segment": "Mzs",
     }
 
     try:

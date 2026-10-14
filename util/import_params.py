@@ -125,8 +125,8 @@ def import_parameters():
             {"water_qs": "104000", "tidal_level": "dc", "dir_name": "104000dc"},
         ]
 
-    # 定义默认的河段和时间点
-    segments = ["Mzs"]
+    # 定义默认的河段和数据集域（bench_segment 同时承担查询域角色）
+    segments = ["Yangtze"]
     timepoints = ["202304"]
     comparison_timepoint = "201904"
 
@@ -162,7 +162,7 @@ def import_parameters():
                     param_id_db = db_ops.create_basic_param(
                         param_id=param_id,
                         param_name=param_name,
-                        segment=segment,
+                        bench_segment=segment,
                         current_timepoint=current_timepoint,
                         set_name=set_name,
                         water_qs=combo["water_qs"],
@@ -203,7 +203,7 @@ def import_parameters():
             db_ops.create_basic_param(
                 param_id=default_param_id,
                 param_name="默认参数模板",
-                segment="Mzs",
+                bench_segment="Yangtze",
                 current_timepoint=normalize_timepoint("202304"),
                 set_name="standard",
                 water_qs="10000",
