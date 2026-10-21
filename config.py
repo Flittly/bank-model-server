@@ -44,6 +44,9 @@ API_FS_RESULT_FILE = API_VERSION + "/fs/result/file"
 API_FS_RESOURCE_FILE = API_VERSION + "/fs/resource/file"
 API_FS_RESOURCE_ZIP = API_VERSION + "/fs/resource/zip"
 API_FS_RESOURCE_HYDRODYNAMIC_LIST = API_VERSION + "/fs/resource/hydrodynamic/list"
+# 按场景生成的流场（resource/flowField/<scene-id>/），与上面那批固定素材是两条链路
+API_FS_RESOURCE_FLOW_FIELD_SCENES = API_VERSION + "/fs/resource/flow-field/scenes"
+API_FS_RESOURCE_FLOW_FIELD_RESOLVE = API_VERSION + "/fs/resource/flow-field/resolve"
 
 API_FS_RESOURCE_DELETE = API_VERSION + "/fs/resource"
 API_FS_RESOURCE_ADF = API_VERSION + "/fs/resource/adf"
@@ -114,6 +117,10 @@ DIR_RESOURCE_GEOJSON = os.path.join(DIR_ROOT, "resource", "geojson")
 DIR_RESOURCE_HYDRODYNAMIC = os.path.join(DIR_ROOT, "resource", "hydrodynamic")
 DIR_RESOURCE_EROSIONMODEL = os.path.join(DIR_ROOT, "resource", "erosionModel")
 
+# PQ（造床流量当量）只有一份按年份排列的全局序列，不按岸段拆分：
+# resource/json/Mzs/2023/standard/PQ/pq.json（路径里的 2023 只是所在层级，
+# 文件内部才是 2010–2023 全套年份）。flowEquivalent.py 先按 <segment>/<year> 找，
+# 找不到再按 <segment> 找，最后回退到这里；三条都不存在就报错，不返回默认值。
 DIR_RESOURCE_PQ_TEMPLATE = os.path.join(
     DIR_ROOT, "resource", "json", "Mzs", "2023", "standard", "PQ", "pq.json"
 )
@@ -161,6 +168,31 @@ CAL_CORE_NUM = 5
 MAX_RUNNING_MODEL_CASE_NUM = 20
 MODEL_SERVICE_POLL_INTERVAL = 1
 MODEL_SERVICE_DEFAULT_TIMEOUT = 600
+
+# ---- Case 锁的自愈参数 ----------------------------------------------------
+# LOCK 只表示「这个 case 被某个请求认领了」，它没有持有者记录、也没有租约，
+# 认领它的进程一死，锁就永远留在 status/2 上。/v0/mc/status 对它恒回 pending，
+# 网关只能每秒轮询到 600s 超时。下面三个阈值用来判定「这把锁的主人已经不在了」：
+#   MODEL_CASE_MONITOR_INTERVAL_SECONDS  监控线程写心跳（case/<id>/monitor.heartbeat）的间隔
+#   MODEL_CASE_STALE_LOCK_SECONDS        只有 LOCK、没有 RUNNING（子进程压根没进包装器）的空闲阈值
+#   MODEL_CASE_STALE_RUNNING_SECONDS     LOCK|RUNNING（子进程进过包装器）的空闲阈值，要更宽松
+# 空闲时间取自 runtime.json 的 updated-at 与心跳文件中较新的那个：
+# 监控线程活着时心跳每 2 秒刷新一次，所以「真在跑」的 case 永远不会被判成过期。
+MODEL_CASE_MONITOR_INTERVAL_SECONDS = int(
+    os.getenv("MODEL_CASE_MONITOR_INTERVAL_SECONDS", "2")
+)
+MODEL_CASE_STALE_LOCK_SECONDS = int(os.getenv("MODEL_CASE_STALE_LOCK_SECONDS", "30"))
+MODEL_CASE_STALE_RUNNING_SECONDS = int(
+    os.getenv("MODEL_CASE_STALE_RUNNING_SECONDS", "600")
+)
+# 常驻巡检间隔：服务不重启时，用来看护「daemon 已经死了、但服务还在」这种
+# 半死状态（case 停在 LOCK|RUNNING，没人推进）。默认 60s，设 0 关闭。
+MODEL_CASE_WATCHDOG_SECONDS = int(os.getenv("MODEL_CASE_WATCHDOG_SECONDS", "60"))
+# 单个模型子进程的硬超时（秒）。默认 0 = 不启用：单断面耗时波动大，
+# 硬杀比"卡住"更容易丢结果；需要时用环境变量显式打开。
+MODEL_CASE_CHILD_TIMEOUT_SECONDS = int(
+    os.getenv("MODEL_CASE_CHILD_TIMEOUT_SECONDS", "0")
+)
 
 # Kafka 配置
 KAFKA_ENABLED = _env_flag("KAFKA_ENABLED", False)

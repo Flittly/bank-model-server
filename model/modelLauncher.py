@@ -1,21 +1,17 @@
 import os
 import sys
-import time
-import copy
 import util
 import model
 import types
 import config
 import marshal
 import traceback
-import threading
 import functools
 import py_compile
-import subprocess
-import multiprocessing
 from typing import cast
 from .modelProcess import Process_Queue
 from .modelCaseReference import ModelCaseReference as MCR
+from .modelRecovery import reset_error_for_retry, try_recover_stale_lock
 
 ######################################## AOP ########################################
 
@@ -143,42 +139,6 @@ def load_code_from_pyc(pyc_path: str):
     return code_obj
 
 
-def monitor_subprocess(args: list[str]):
-    ids = copy.deepcopy(args)
-    args.insert(0, sys.executable)
-    process = None
-
-    try:
-        process = subprocess.Popen(args)
-
-        while True:
-            return_code = process.poll()
-
-            if return_code is None:
-                pass
-            else:
-                break
-            time.sleep(3)
-
-    except OSError as e:
-        print(f"Error Happened When Model Case Is Running: {e}", flush=True)
-
-    finally:
-        if process is not None and process.poll() is None:
-            process.kill()
-            for id in ids:
-                mcr = MCR.open_case(id)
-                if mcr is not None and mcr.find_status(config.STATUS_LOCK):
-                    mcr.update_status(
-                        config.STATUS_ERROR | config.STATUS_UNLOCK,
-                        "Unexpected Error Happend!",
-                    )
-
-
-def safe_launcher(command: list[str]):
-    threading.Thread(target=monitor_subprocess, args=(command,)).start()
-
-
 ######################################## Model Launcher ########################################
 
 # TODO: Need to check whether mcrs is valid
@@ -196,7 +156,13 @@ def mcr_checker(mcrs: list[MCR]):
     if (core_status & config.STATUS_COMPLETE) or (core_status & config.STATUS_ERROR):
         return False
     if (core_status & config.STATUS_LOCK) or (core_status & config.STATUS_RUNNING):
-        return False
+        # LOCK 没有持有者记录、也没有租约：认领它的子进程一死，锁永远不会被释放。
+        # 以前这里直接 return False ⇒ 同一个参数重跑必然撞回那把僵尸锁（case id 是
+        # md5(url+json)），连重启服务都没用。现在先问一句「还有活的监控进程在写心跳吗」，
+        # 真过期就把它重置成 UNLOCK 重新入队。
+        if not try_recover_stale_lock(core_mcr):
+            return False
+        core_status = core_mcr.get_status()
 
     # Check if any other model cases is error (simplified)
     error_case_ids = []
@@ -319,11 +285,22 @@ class ModelLauncher:
         if core_mcr.find_status(config.STATUS_COMPLETE) or core_mcr.find_status(
             config.STATUS_ERROR
         ):
-            print(
-                f"[launcher] skip api={self.api} core_case={core_mcr.id} status={core_mcr.get_status()}",
-                flush=True,
-            )
-            return core_mcr
+            # ERROR 也是"缓存命中直接返回"。但子进程被 Ctrl+C 杀掉、或依赖被它带崩，
+            # 这类失败跟输入无关，属于环境问题——此时必须允许重跑，否则这个断面
+            # （case id 由 md5(url+json) 决定）会一直失败下去，除非手工清缓存。
+            if core_mcr.find_status(config.STATUS_ERROR) and reset_error_for_retry(
+                core_mcr, "Retry after an infrastructure failure"
+            ):
+                print(
+                    f"[launcher] retry infra-error api={self.api} core_case={core_mcr.id}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[launcher] skip api={self.api} core_case={core_mcr.id} status={core_mcr.get_status()}",
+                    flush=True,
+                )
+                return core_mcr
 
         # Check whether core model case is valid for running
         if mcr_checker(mcrs):
