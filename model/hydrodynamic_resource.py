@@ -1,5 +1,4 @@
 import os
-import io
 import re
 import sys
 import json
@@ -8,7 +7,24 @@ import struct
 import subprocess
 from osgeo import osr
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+def _ensure_utf8_stdout() -> None:
+    """Windows 控制台默认编码不是 UTF-8，直接 print 中文会乱码甚至抛 UnicodeEncodeError。
+
+    这里必须用 ``reconfigure`` **原地**调整编码，而不是 ``sys.stdout = io.TextIOWrapper(...)``
+    新建包装器覆盖：新建会让原对象失去引用，在 pytest 等已经把 sys.stdout 换成捕获流的场景下，
+    旧流被 GC 关闭后会抛 "ValueError: I/O operation on closed file"，
+    导致整个测试框架在 session 收尾时崩溃（本仓库曾因此无法跑 pytest）。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding='utf-8')  # type: ignore[union-attr]
+        except Exception:
+            # 流不支持 reconfigure（如被测试框架替换/包装过）时静默跳过，
+            # 这是增强项，不应影响导入方。
+            continue
+
+
+_ensure_utf8_stdout()
 
 module_path = os.path.abspath(os.path.join(os.getcwd()))
 if module_path not in sys.path:

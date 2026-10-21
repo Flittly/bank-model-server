@@ -75,7 +75,10 @@ private:
     std::vector<std::string> m_targetSpaces;
 
     GDALDataset* m_ds;
-    OGRSpatialReference* m_sRef;
+    // GDAL 3.9 起 OGRLayer::GetSpatialRef() 返回 const 指针，必须跟着加 const，
+    // 否则在 GDAL 3.12（OSGeo4W 现装版本）下 MSVC 直接报 C2440。exportToWkt 本身是 const，
+    // 所以这里加 const 不影响任何调用。
+    const OGRSpatialReference* m_sRef;
     OGRGeometry* m_vectorMask;
     char** m_maskOptions;
     std::vector<char> m_bmpMask;

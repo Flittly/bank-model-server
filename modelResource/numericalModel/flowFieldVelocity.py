@@ -13,23 +13,43 @@ import util
 from util import db_ops
 
 
-def geo2proj(lng, lat, EPSG=4326):
+# 目标投影：Xian 1980 / 3-degree Gauss-Kruger CM 120E。
+# `hydrodynamic_points.x/y` 就存这个坐标系，查最近水文点用的也是它。
+TARGET_EPSG = 2437
+
+
+def geo2proj(x, y, EPSG=4326):
+    """把 (x, y) 从 EPSG 投影到 EPSG:2437，返回 (东, 北)。
+
+    **必须显式声明传统 GIS 轴序**。GDAL 3 对 EPSG:4326 采用 lat/lon 的 authority
+    轴序，旧实现靠 `AddPoint(lat, lng)` + `return (GetY, GetX)` 两次交换把它抵消掉
+    —— 对 4326 恰好正确，但**对 EPSG:3857 会翻成垃圾坐标**（3857 本身就是 (x, y)
+    轴序，交换不再抵消）：
+
+        旧: geo2proj(13355639.0, 3767113.0, 3857) -> (-1080867.8, 9894925.2)
+        应为:                                       (497644.1, 3545103.5)
+
+    而这个函数恰恰会被 `section.json` 里的 3857 坡脚坐标（`points_v`）调用。错误
+    坐标让「最近水文点」的 `ORDER BY (x-x0)^2+(y-y0)^2` 被常量偏移主导，排序退化
+    成「x 最小 / y 最大」，与断面位置无关 —— 所有断面于是取到同一个水文点，Ky 恒等
+    于回归式前因子 2.4231。
+
+    `SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER)` 让两种源投影都按 (x, y)
+    解释，不再需要任何交换。
+    """
     source = osr.SpatialReference()
     source.ImportFromEPSG(EPSG)
+    source.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
 
     target = osr.SpatialReference()
-    target.ImportFromEPSG(2437)
-
-    transform = osr.CoordinateTransformation(source, target)
+    target.ImportFromEPSG(TARGET_EPSG)
+    target.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
 
     point = ogr.Geometry(ogr.wkbPoint)
-    point.AddPoint(lat, lng)
+    point.AddPoint(float(x), float(y))
+    point.Transform(osr.CoordinateTransformation(source, target))
 
-    point.Transform(transform)
-
-    lat_prj, lng_prj = point.GetX(), point.GetY()
-
-    return lng_prj, lat_prj
+    return point.GetX(), point.GetY()
 
 
 def get_flow_field_velocity(series, lng, lat):
@@ -37,6 +57,17 @@ def get_flow_field_velocity(series, lng, lat):
     vs = [float(item.get("v") or 0.0) for item in series]
 
     return {"us": us, "vs": vs}
+
+
+def _plausible_in_2437(x, y):
+    """(x, y) 是否落在 EPSG:2437 的合理范围内。
+
+    2437 是国内 3 度带高斯-克吕格，长江流域的东坐标约 3e5~7e5、北坐标约 3e6~4e6。
+    这里给一个宽松的包围盒，只为拦住「投影失败」这类数量级错误：`(1.3e7, 3.7e6)`
+    被当经度投出来会变成 `(-1e6, 9.9e6)`，那样查最近点会退化成一个与位置无关的常量，
+    而结果看起来完全正常（Ky 恒等于回归式前因子）。宁可在这里抛错。
+    """
+    return 1.0e5 <= x <= 1.5e6 and 1.0e6 <= y <= 6.0e6
 
 
 def get_hydrodynamic_series_by_coordinate(hydrodynamic_mcr, lng, lat):
@@ -52,6 +83,13 @@ def get_hydrodynamic_series_by_coordinate(hydrodynamic_mcr, lng, lat):
     else:
         lng_prj = _lng
         lat_prj = _lat
+
+    if not _plausible_in_2437(lng_prj, lat_prj):
+        raise ValueError(
+            f"coordinate projection failed: input=({_lng}, {_lat}) "
+            f"projected=({lng_prj}, {lat_prj}) is outside the plausible EPSG:2437 "
+            f"range of the Yangtze study area"
+        )
 
     nearest_point = db_ops.get_nearest_hydrodynamic_point(
         dataset_domain=hydrodynamic_mcr.request_json["segment"],

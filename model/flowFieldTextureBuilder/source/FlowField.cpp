@@ -325,17 +325,47 @@ void FlowField::buildBmpMask(int width, int height)
 {
     if (m_ds == NULL)
         return;
-    m_maskOptions = CSLAddString(m_maskOptions, "-ts");
-    m_maskOptions = CSLAddString(m_maskOptions, std::to_string(width).c_str());
-    m_maskOptions = CSLAddString(m_maskOptions, std::to_string(height).c_str());
 
-    auto options = GDALRasterizeOptionsNew(m_maskOptions, NULL);
+    // m_maskOptions 是成员变量，由 createVectorMask() 建一次、跨帧复用；而本函数每帧都被调用。
+    // 原实现直接往 m_maskOptions 上追加 "-ts w h"，于是从第 2 帧开始参数表里就有两个 -ts，
+    // GDAL 报 "Duplicate argument -ts" / "Size and resolution are missing" 并拒绝栅格化，
+    // mask.bmp 根本没被写出来 ⇒ readBmpMask() 的 stbi_load 返回 null（未定义行为）
+    // ⇒ m_vectorMask 退化成"每个陆域格随机指一个水域格"，粒子会飘上岸。
+    // 改法：本帧在副本上追加 -ts，交给 GDALRasterizeOptionsNew 之后就释放，绝不动成员。
+    // （GDALRasterizeOptionsNew 只读一遍参数表，返回的 options 不持有 papszArgv。）
+    char** argv = CSLDuplicate(m_maskOptions);
+    argv = CSLAddString(argv, "-ts");
+    argv = CSLAddString(argv, std::to_string(width).c_str());
+    argv = CSLAddString(argv, std::to_string(height).c_str());
 
-    int error;
+    auto options = GDALRasterizeOptionsNew(argv, NULL);
+    CSLDestroy(argv);
+
+    int error = 0;
     auto bmpPath = m_outUrl + "mask.bmp";
-    GDALClose(GDALRasterize(bmpPath.c_str(), NULL, m_ds, options, &error));
+    auto ds = GDALRasterize(bmpPath.c_str(), NULL, m_ds, options, &error);
+    if (ds == NULL)
+    {
+        std::cerr << "[FlowField] 矢量掩膜栅格化失败（mask.bmp 未生成），"
+                  << "本轮掩膜语义将退化为随机水域格。GDAL error=" << error << std::endl;
+    }
+    else
+    {
+        GDALClose(ds);
+    }
     GDALRasterizeOptionsFree(options);
     readBmpMask();
+
+    // 下游（toTextureGRID_uv / toTextureGRID_elevation / Xpand）全部按 (ny-iy-1)*nx*3+ix*3
+    // 直接下标访问 m_bmpMask，不做长度检查。栅格化失败时这里必须补一张等尺寸的"全通过"缓冲，
+    // 否则就是越界读栈内存 —— 表现为随机的粒子上岸/整图空白，且不报错。
+    size_t expected = size_t(width) * size_t(height) * 3;
+    if (m_bmpMask.size() != expected)
+    {
+        std::cerr << "[FlowField] 掩膜尺寸异常（得到 " << m_bmpMask.size() << "，期望 "
+                  << expected << "），本帧按「不做陆域屏蔽」处理。" << std::endl;
+        m_bmpMask.assign(expected, 1);
+    }
 }
 
 void FlowField::closeDataSet()
@@ -348,12 +378,39 @@ void FlowField::readBmpMask()
     int width, height, n;
     auto bmpPath = m_outUrl + "mask.bmp";
     auto data = stbi_load(bmpPath.c_str(), &width, &height, &n, 0);
+    if (data == NULL)
+    {
+        // 必须显式挡掉：原来直接拿 nullptr 去构造 vector，越界读栈，报错也不出声。
+        std::cerr << "[FlowField] 读不到 " << bmpPath
+                  << "（stbi_load 返回 null），矢量掩膜不可用。" << std::endl;
+        m_bmpMask.clear();
+        return;
+    }
     m_bmpMask = std::vector<char>(data, data + width * height * n);
     stbi_image_free(data);
 }
 
 FlowField::FlowField(const char* descriptionPath)
-    :m_descriptionPath(descriptionPath)
+    // 下面这几个数组**必须**给初值。原来一个都没初始化，于是：
+    //   * updateFlowUV / updateFlowPH 里的 "取更小/更大" 是拿未初始化的栈内存去比，
+    //     v_max 曾经拿到 1.8e+184 —— 而 v 的归一化是 (v - v_min)/(v_max - v_min)，
+    //     分母一大，整张纹理的 v 分量全被压成 0（实测 v_norm 100% 为零）。
+    //   * m_boundary 在没给矢量边界时也是未初始化的，而它直接当过滤框用
+    //     （`x < m_boundary[0] || x > m_boundary[2] ...` ⇒ continue），
+    //     表现是"所有点都被丢掉、却看不出任何报错"。
+    // 给成"反向极值 / 空框"之后：极值会从第一个样本长出来；没有边界时等于不做过滤。
+    // 有矢量边界时 m_boundary 会被 createVectorMask() 正常覆盖。
+    : m_descriptionPath(descriptionPath),
+      m_attributeIndex{-1, -1, -1, -1, -1, -1},
+      m_boundary{-DBL_MAX, -DBL_MAX, DBL_MAX, DBL_MAX},
+      m_flowVelocityRange{DBL_MAX, DBL_MAX, -DBL_MAX, -DBL_MAX},
+      m_flowPRange{DBL_MAX, -DBL_MAX},
+      m_flowHRange{DBL_MAX, -DBL_MAX},
+      m_terrainRange{DBL_MAX, -DBL_MAX},
+      m_ds(nullptr),
+      m_sRef(nullptr),
+      m_vectorMask(nullptr),
+      m_maskOptions(nullptr)
 {
     std::ifstream iStream(m_descriptionPath);
     Json descriptiveJson;

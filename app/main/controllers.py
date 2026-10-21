@@ -180,6 +180,49 @@ def get_disk_usage() -> dict[str, Any]:
     return {"usage": StorageMonitor().get_size()}
 
 
+def _flow_field_scene_module():
+    """按需导入场景模块。
+
+    它一进来就会 `import numpy` 并连库读 `tiff_bounds`，放在模块顶层会让
+    "只想看健康检查"的启动路径也背上这些成本，所以拖到真正调用时再导。
+    """
+    from model import flowFieldSceneResource
+
+    return flowFieldSceneResource
+
+
+def get_flow_field_scene_list() -> dict[str, Any]:
+    """列出 `resource/flowField/` 下所有已生成的场景。
+
+    `scene.json` 里的 `temp` 场景不会出现在这里（临时产物不对外暴露）。
+    """
+    scenes = _flow_field_scene_module().list_scenes()
+    return {"scenes": scenes, "count": len(scenes)}
+
+
+def resolve_flow_field_scene(
+    tiff_key: str,
+    water_qs: str,
+    tidal_level: str,
+    resolution: int = 1024,
+) -> dict[str, Any]:
+    """按「DEM + 流量档 + 潮位」解析出对应的场景。
+
+    **只查不生成**（生成一次 60 s 以上，不能挂在请求里）。找不到时 `found=false`，
+    由调用方决定是提示用户、还是走离线批量生成。
+
+    场景 id 的规则只在本处（Python）实现一次，Java 侧不要复刻哈希。
+    """
+    if not tiff_key or not water_qs or not tidal_level:
+        raise ValueError("tiff_key / water_qs / tidal_level 都不能为空")
+    module = _flow_field_scene_module()
+    scene_id = module.scene_id_for(tiff_key, water_qs, tidal_level, resolution)
+    manifest = module.resolve_scene(tiff_key, water_qs, tidal_level, resolution)
+    if manifest is None:
+        return {"found": False, "scene_id": scene_id, "tiff_key": tiff_key}
+    return {"found": True, "scene_id": scene_id, "scene": manifest}
+
+
 def get_hydrodynamic_resource_list() -> dict[str, Any]:
     response = {"resource": []}
     for segment_name in util.get_directories(config.DIR_RESOURCE_HYDRODYNAMIC):

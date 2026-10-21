@@ -395,6 +395,26 @@ async def get_hydrodynamic_resource_list() -> dict[str, Any]:
     return controllers.get_hydrodynamic_resource_list()
 
 
+@api_router.get(f"{config.API_FS_RESOURCE_FLOW_FIELD_SCENES}")
+async def get_flow_field_scene_list() -> dict[str, Any]:
+    """按场景生成的流场清单（resource/flowField/<scene-id>/）。"""
+    return controllers.get_flow_field_scene_list()
+
+
+@api_router.get(f"{config.API_FS_RESOURCE_FLOW_FIELD_RESOLVE}")
+async def resolve_flow_field_scene(
+    tiff_key: str = Query(..., description="DEM 的 tiff_key，用于定位场景"),
+    water_qs: str = Query(..., description="流量档，如 84000"),
+    tidal_level: str = Query(..., description="潮位/地形年份，如 1998-2018"),
+    resolution: int = Query(1024, description="纹理长边格数"),
+) -> dict[str, Any]:
+    """按 DEM + 水情解析场景；只查不生成。"""
+    try:
+        return controllers.resolve_flow_field_scene(tiff_key, water_qs, tidal_level, resolution)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @api_router.post("/api/v1/tiff/extract-bounds")
 async def extract_tiff_bounds_api(request: Request) -> dict[str, Any]:
     """提取 tiff 文件边界并存储到数据库"""
