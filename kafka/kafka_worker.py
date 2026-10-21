@@ -19,7 +19,11 @@ from kafka_executor import execute_risk_level_task
 
 
 class TerrainCache:
-    """地形数据缓存管理器"""
+    """地形数据缓存管理器。
+
+    ⚠ 当前 **未接入主流程**（run() 中不调用）。原因与接入前需统一的三处约定，
+    见 KafkaModelWorker._load_terrain_if_needed 的说明。
+    """
 
     def __init__(self, cache_dir=None):
         self.cache_dir = cache_dir or config.DIR_TERRAIN_CACHE
@@ -90,8 +94,10 @@ class KafkaModelWorker:
         初始化 Kafka Worker
 
         Args:
-            assigned_banks: 分配给此 Worker 的岸段 ID 列表
-                           如果为 None，则处理所有岸段
+            assigned_banks: 期望由本 worker 处理的岸段 ID 列表。
+                            **仅用于部署自检**（收到名单外岸段时告警一次），不参与调度；
+                            None 或空表示不做自检。真正的岸段分工来自 Kafka 分区分配
+                            （生产者以 bankId 为 key，同一岸段固定进同一分区）。
         """
         self.worker_id = config.KAFKA_WORKER_ID
         self.bootstrap_servers = config.KAFKA_BOOTSTRAP_SERVERS
@@ -99,10 +105,14 @@ class KafkaModelWorker:
         self.result_topic = config.KAFKA_RESULT_TOPIC
         self._running = True
 
-        # 分配的岸段（为空则处理所有岸段）
+        # 岸段名单：已降级为「部署自检」，不再参与调度（曾因「跳过且不 commit」造成队头阻塞）。
         self.assigned_banks = assigned_banks or config.KAFKA_ASSIGNED_BANKS
+        self._warned_banks: set = set()  # 已告警过的名单外岸段，避免刷日志
         if self.assigned_banks:
-            print(f"[kafka-worker] 只处理岸段: {self.assigned_banks}", flush=True)
+            print(
+                f"[kafka-worker] 期望岸段（仅自检，不用于过滤）: {self.assigned_banks}",
+                flush=True,
+            )
 
         # 地形数据缓存
         self.terrain_cache = TerrainCache()
@@ -141,7 +151,11 @@ class KafkaModelWorker:
         print(f"[kafka-worker] result_topic={self.result_topic}", flush=True)
 
         if self.assigned_banks:
-            print(f"[kafka-worker] 分配岸段: {self.assigned_banks}", flush=True)
+            print(
+                f"[kafka-worker] 期望岸段: {self.assigned_banks}"
+                f"（不用于过滤；实际处理范围 = Kafka 分配给本 worker 的分区）",
+                flush=True,
+            )
 
         while self._running:
             msg = self.consumer.poll(timeout=1.0)
@@ -152,18 +166,27 @@ class KafkaModelWorker:
                 print(f"[kafka-worker] 消费错误 error={msg.error()}", flush=True)
                 continue
 
-            task = json.loads(msg.value().decode("utf-8"))
+            # 解析消息也必须在保护内：畸形消息（非 JSON / 空 body）同样会打断整个 worker
+            try:
+                task = json.loads(msg.value().decode("utf-8"))
+            except Exception as e:
+                print(f"[kafka-worker] 消息不是合法 JSON，丢弃本条: {e}", flush=True)
+                self.consumer.commit(msg)
+                continue
+
             bank_id = task.get("bankId", "")
             section_id = task.get("sectionId", "")
             run_id = task.get("runId", "")
             task_id = task.get("taskId", "")
 
-            # 检查是否应该处理此岸段
+            # 岸段分工只由 Kafka 分区分配决定：生产者以 bankId 为 key，同一岸段固定进同一分区，
+            # 消费者组再按分区把负载分给各 worker。所以「不在 assigned_banks 里」并不等于
+            # 「该由别人处理」——这条消息已经分给我了：
+            #   ① 我若跳过，不会有人再来处理它（分区不会转给别的 worker）；
+            #   ② 不提交偏移量会阻塞该分区后续所有消息（队头阻塞）。
+            # 故此处只告警、绝不跳过。详见 _warn_unexpected_bank。
             if self.assigned_banks and bank_id not in self.assigned_banks:
-                print(f"[kafka-worker] 跳过非分配岸段: bankId={bank_id}", flush=True)
-                # 不提交偏移量，让其他 Worker 处理
-                # 注意：这种方式需要手动管理分区分配
-                continue
+                self._warn_unexpected_bank(bank_id)
 
             print(
                 f"[kafka-worker] 收到任务 runId={run_id} taskId={task_id} sectionId={section_id} bankId={bank_id}",
@@ -171,11 +194,9 @@ class KafkaModelWorker:
             )
 
             try:
-                # 加载地形数据（如果是新岸段）
-                terrain_path = self._load_terrain_if_needed(task)
-
-                # 执行计算
-                result = execute_risk_level_task(task, self.worker_id, terrain_path)
+                # 只传 2 个参数，与 kafka_executor.execute_risk_level_task 的签名保持一致。
+                # 地形预下载（TerrainCache）尚未与模型侧的 DEM 解析接通，见 _load_terrain_if_needed。
+                result = execute_risk_level_task(task, self.worker_id)
 
                 # 发送结果
                 self._send_result(result)
@@ -184,12 +205,41 @@ class KafkaModelWorker:
                 self.consumer.commit(msg)
 
             except Exception as e:
-                print(f"[kafka-worker] 处理任务失败: {e}", flush=True)
-                # 可以选择发送到死信队列或重新抛出让 Kafka 重试
-                raise
+                # 绝不能把异常抛出 run()：那会直接结束整个 worker 循环；且偏移量不提交
+                # 会导致同一条消息被无限重放（毒消息）。统一交给 _handle_failure 兜底。
+                self._handle_failure(msg, task, e)
+                continue
+
+    def _warn_unexpected_bank(self, bank_id: str) -> None:
+        """收到名单外的岸段：告警一次，但仍然处理。**绝不跳过**。
+
+        为什么不跳过：分区由消费者组分配，一条消息只会落到某一个 worker（不会"让给"别人）。
+        若该 worker 因名单不匹配而跳过、又不提交偏移量，这条消息就没有任何人处理，
+        且会阻塞该分区内后续所有消息（队头阻塞，且因 earliest + 不 commit 而反复重放）。
+        因此名单只承担「部署自检」职责：它告警说明 topic 分区数/实例数与预期不符。
+        """
+        if bank_id in self._warned_banks:
+            return
+        self._warned_banks.add(bank_id)
+        print(
+            f"[kafka-worker] 警告: 收到名单外岸段 bankId={bank_id}"
+            f"（assigned_banks={self.assigned_banks}），仍按 Kafka 分区分配处理。"
+            f"若期望该岸段由其他 worker 处理，请调整 topic 分区数 / worker 实例数，"
+            f"不要依赖 assigned_banks 过滤。",
+            flush=True,
+        )
 
     def _load_terrain_if_needed(self, task: dict) -> str:
-        """如果是新岸段，加载地形数据"""
+        """如果是新岸段，加载地形数据。
+
+        ⚠ 该方法当前 **未接入主流程**（run() 中不调用），请勿直接接回，原因：
+        1. 模型侧 riskLevel.py 并不读 ModelTask.terrainKey，而是用 ``dem-id = bench-id``
+           经 resolve_tiff_path 自行解析 DEM；
+        2. 本方法用的缓存目录 DIR_TERRAIN_CACHE 落在资源根目录之外，
+           而 resolve_resource_path 只搜 resource/ 与 resource/cache/，路径传过去也命中不了；
+        3. 缓存文件名把 "/" 换成 "_"（如 tiff_BANK_001.tif），与资源键 tiff/xxx.tif 不一致。
+        要用起来需先统一以上三处约定。
+        """
         bank_id = task.get("bankId", "")
         terrain_bucket = task.get("terrainBucket", config.RUSTFS_BUCKET)
         terrain_key = task.get("terrainKey", "")
@@ -212,8 +262,50 @@ class KafkaModelWorker:
 
         return self.current_terrain_path
 
+    def _handle_failure(self, msg, task: dict, exc: Exception) -> None:
+        """消费失败的兜底处理：回写 ERROR 结果 + 提交偏移量，**绝不向上抛异常**。
+
+        为什么必须这样做：
+        1. 若把异常抛出 run()，会直接结束整个 worker 循环——一条坏消息就能打死 worker；
+        2. 若只跳过不提交偏移量，同一条消息会被反复重放（毒消息死循环）；
+        3. 回写 ERROR 结果后，Java 侧会把它计入 failed_count，任务才能收敛到 partial_failed，
+           否则任务会永远挂在 running。
+
+        ERROR 结果的字段结构与 kafka_executor.execute_risk_level_task 的错误分支保持一致。
+        """
+        run_id = task.get("runId")
+        section_id = task.get("sectionId")
+        print(
+            f"[kafka-worker] 处理任务失败 runId={run_id} sectionId={section_id}: {exc}",
+            flush=True,
+        )
+
+        try:
+            self._send_result({
+                "runId": run_id,
+                "taskId": task.get("taskId"),
+                "sectionId": section_id,
+                "status": "ERROR",
+                "riskLevel": None,
+                "rawResult": None,
+                "artifactPath": None,
+                "workerId": self.worker_id,
+                "startedAt": None,
+                "completedAt": None,
+                "durationMs": None,
+                "errorMessage": str(exc),
+            })
+        except Exception as send_exc:  # noqa: BLE001 - 兜底路径不允许再抛出
+            print(f"[kafka-worker] 回写 ERROR 结果失败: {send_exc}", flush=True)
+
+        try:
+            self.consumer.commit(msg)
+        except Exception as commit_exc:  # noqa: BLE001 - 兜底路径不允许再抛出
+            print(f"[kafka-worker] 提交偏移量失败: {commit_exc}", flush=True)
+
     def _send_result(self, result: dict) -> None:
-        key = f"{result['runId']}:{result['sectionId']}"
+        # 用 get 兜底：兜底路径下 runId/sectionId 可能缺失，不能让 key 构造抛异常
+        key = f"{result.get('runId', '')}:{result.get('sectionId', '')}"
 
         def delivery_report(err, msg):
             if err is not None:
@@ -271,11 +363,12 @@ def main() -> None:
         "--banks",
         type=str,
         default="",
-        help="分配的岸段 ID，逗号分隔，例如: BANK_001,BANK_002",
+        help="【仅自检，不再过滤】期望处理的岸段 ID，逗号分隔，例如: BANK_001,BANK_002。"
+             "收到名单外岸段时只告警；实际处理范围由 Kafka 分区分配决定",
     )
     args = parser.parse_args()
 
-    # 解析岸段列表
+    # 解析岸段列表（自检用，不参与调度）
     assigned_banks = (
         [b.strip() for b in args.banks.split(",") if b.strip()] if args.banks else []
     )

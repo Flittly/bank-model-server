@@ -7,7 +7,10 @@ import model
 
 
 def _utc_now() -> str:
-    return dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    # datetime.utcnow() 已弃用（将在未来版本移除）。改用带时区的 now() 后
+    # 再转回 naive，以保持与原实现完全一致的输出格式（naive UTC + "Z"），
+    # 避免影响 Java 侧对时间戳的解析。
+    return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None, microsecond=0).isoformat() + "Z"
 
 
 def _normalize_risk_level(risk_vector: Any) -> int:
