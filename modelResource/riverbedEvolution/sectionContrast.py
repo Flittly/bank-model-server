@@ -55,15 +55,35 @@ def _dataset_debug_info(path):
     return info
 
 
+def force_traditional_axis_order(srs):
+    """Force ``(x, y) = (经度/东向, 纬度/北向)`` axis order on an OGR SRS.
+
+    GDAL 3 respects the authority-defined axis order by default: EPSG:4326 is
+    ``(lat, lon)`` and Beijing 1954 / Gauss-Kruger (EPSG:2437) is
+    ``(northing, easting)``. GeoJSON stores coordinates as ``(lon, lat)``, so
+    without this call ``TransformPoint`` reads the longitude as a latitude and
+    hands back ``(northing, easting)``, which ``prj2imagexy`` then treats as
+    ``(easting, northing)`` - every sample lands outside the raster and gets
+    clamped to its bottom-right corner (pure nodata).
+    """
+    srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+    return srs
+
+
 # specific crs change process
 def transform_coordinates(coords, source_srs, target_srs):
+    # GeoJSON 的坐标顺序恒为 (x, y) = (经度, 纬度)，与 CRS 的权威轴序无关，
+    # 因此两端都显式声明传统 GIS 轴序，避免入口/出口只换一半。
+    force_traditional_axis_order(source_srs)
+    force_traditional_axis_order(target_srs)
+
     # 创建坐标转换对象
     transform = osr.CoordinateTransformation(source_srs, target_srs)
 
     # 转换坐标
     transformed_coords = []
     for coord in coords:
-        x, y = coord
+        x, y = coord[0], coord[1]
         transformed_coords.append(transform.TransformPoint(x, y)[0:2])
 
     return transformed_coords
@@ -108,11 +128,7 @@ def convert_geojson_to_2437(geojson_data, dataset):
     if not geojson_data.get("features"):
         features = []
         coordinates = geojson_data["geometry"]["coordinates"]
-        # swarp coordinates
-        for coordinate in coordinates:
-            tmp = coordinate[0]
-            coordinate[0] = coordinate[1]
-            coordinate[1] = tmp
+        # 不再交换 x/y：GeoJSON 已是 (lon, lat)，轴序由 transform_coordinates 统一声明
         feature = {
             "type": "Feature",
             "properties": {},

@@ -67,15 +67,151 @@ def _geometry_debug_info(geometry):
     }
 
 
+########################################################################
+# Nodata guard
+#
+# The bilinear sampler below has no nodata protection: `get_elevation` hands the
+# raw value of the 4 surrounding cells to `bilinear_interpolation`, so a single
+# nodata corner (=-9999 here) drags the interpolated elevation down to order
+# -1e4. `deepest_index = argmin(z)` is then hijacked by that fake depression and
+# lands on index 0, which silently empties `points_v`/`Sa_v` and only surfaces
+# much later as an unrelated ValueError/IndexError inside the indicators.
+#
+# The guard below keeps the computation on the longest *continuously valid*
+# stretch of the section and turns the unavoidable failures into an explicit,
+# self-describing error instead of a downstream crash.
+########################################################################
+
+# Minimum physical length (m) of the longest continuously valid stretch a
+# section must have to still be worth evaluating. Override with the
+# SECTION_MIN_VALID_LENGTH_M environment variable.
+MIN_VALID_LENGTH_M = float(os.environ.get("SECTION_MIN_VALID_LENGTH_M", "100"))
+MIN_VALID_POINTS = 2
+
+
+class DemCoverageError(RuntimeError):
+    """Raised when a section cannot be evaluated because too much of it falls on
+    DEM nodata cells.
+
+    ``code`` gives the caller a stable reason string, ``detail`` carries the
+    measured coverage so the failure can be triaged without re-running.
+    """
+
+    def __init__(self, code, message, detail=None):
+        super().__init__(f"{code}: {message}")
+        self.code = code
+        self.detail = detail or {}
+
+
+def _load_dem_and_valid_mask(dataset):
+    """Read band 1 once and return ``(dem, valid)``.
+
+    ``valid`` is a boolean array where ``False`` flags nodata / non-finite
+    cells. The nodata value is taken from the band metadata first; when a raster
+    declares none, its mask band is consulted so masked rasters are handled too.
+    """
+    band = dataset.GetRasterBand(1)
+    width = dataset.RasterXSize
+    height = dataset.RasterYSize
+    dem = band.ReadAsArray(0, 0, width, height).astype(np.float32)
+
+    nodata = band.GetNoDataValue()
+    has_nodata = nodata is not None and not (
+        isinstance(nodata, float) and np.isnan(nodata)
+    )
+    if has_nodata:
+        valid = dem != np.float32(nodata)
+    else:
+        valid = np.ones(dem.shape, dtype=bool)
+        try:
+            if band.GetMaskFlags() != gdal.GMF_ALL_VALID:
+                mask = band.GetMaskBand().ReadAsArray(0, 0, width, height)
+                if mask is not None:
+                    valid = np.asarray(mask) > 0
+        except Exception:  # pragma: no cover - mask support varies by driver
+            pass
+
+    # Non-finite values are never usable regardless of what the metadata says.
+    valid &= np.isfinite(dem)
+    return dem, valid
+
+
+def _pixel_quad_validity(interpolated_coors, valid_pixels):
+    """A sample point is usable only when *all four* bilinear corners are valid.
+
+    ``bilinear_interpolation`` blends the 4 corner values, so one nodata corner
+    is enough to corrupt the result; requiring all four keeps the guard aligned
+    with how the elevation is actually produced.
+
+    Coordinates outside the raster count as invalid: ``prj2imagexy`` only clamps
+    the +/-1 neighbours, so a sample point beyond the DEM footprint would index
+    past the array instead of raising a data error.
+    """
+    rows, cols = valid_pixels.shape
+
+    def valid_at(row, col):
+        return 0 <= row < rows and 0 <= col < cols and bool(valid_pixels[row][col])
+
+    flags = []
+    for coor in interpolated_coors:
+        flags.append(
+            valid_at(coor[1], coor[0])
+            and valid_at(coor[3], coor[2])
+            and valid_at(coor[5], coor[4])
+            and valid_at(coor[7], coor[6])
+        )
+    return flags
+
+
+def _longest_valid_run(flags):
+    """Inclusive ``(start, end)`` of the longest contiguous run of True.
+
+    Returns ``(0, -1)`` when there is no valid sample at all.
+    """
+    best_start, best_end = 0, -1
+    start = None
+    for index, flag in enumerate(flags):
+        if flag:
+            if start is None:
+                start = index
+        elif start is not None:
+            if index - 1 - start > best_end - best_start:
+                best_start, best_end = start, index - 1
+            start = None
+    if start is not None and len(flags) - 1 - start > best_end - best_start:
+        best_start, best_end = start, len(flags) - 1
+    return best_start, best_end
+
+
+def force_traditional_axis_order(srs):
+    """Force ``(x, y) = (经度/东向, 纬度/北向)`` axis order on an OGR SRS.
+
+    GDAL 3 respects the authority-defined axis order by default: EPSG:4326 is
+    ``(lat, lon)`` and Beijing 1954 / Gauss-Kruger (EPSG:2437) is
+    ``(northing, easting)``. GeoJSON stores coordinates as ``(lon, lat)``, so
+    without this call ``TransformPoint`` reads the longitude as a latitude and
+    hands back ``(northing, easting)``, which ``prj2imagexy`` then treats as
+    ``(easting, northing)`` - every sample lands outside the raster and gets
+    clamped to its bottom-right corner (pure nodata).
+    """
+    srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+    return srs
+
+
 # specific crs change process
 def transform_coordinates(coords, source_srs, target_srs):
+    # GeoJSON 的坐标顺序恒为 (x, y) = (经度, 纬度)，与 CRS 的权威轴序无关，
+    # 因此两端都显式声明传统 GIS 轴序，避免入口/出口只换一半。
+    force_traditional_axis_order(source_srs)
+    force_traditional_axis_order(target_srs)
+
     # 创建坐标转换对象
     transform = osr.CoordinateTransformation(source_srs, target_srs)
 
     # 转换坐标
     transformed_coords = []
     for coord in coords:
-        x, y = coord
+        x, y = coord[0], coord[1]
         transformed_coords.append(transform.TransformPoint(x, y)[0:2])
 
     return transformed_coords
@@ -111,11 +247,7 @@ def convert_geojson_to_2437(geojson_data, dataset):
             raise KeyError(
                 "Neither 'geometry' nor 'coordinates' found in geojson_data."
             )
-        # swarp coordinates
-        for coordinate in coordinates:
-            tmp = coordinate[0]
-            coordinate[0] = coordinate[1]
-            coordinate[1] = tmp
+        # 不再交换 x/y：GeoJSON 已是 (lon, lat)，轴序由 transform_coordinates 统一声明
         feature = {
             "type": "Feature",
             "properties": {},
@@ -189,19 +321,31 @@ def get_interpolated_pixel_index(image_coors, width, height):
     return interpolated_pixels
 
 
+def _safe_dem_value(dem_data, row, col):
+    """Read one cell, returning NaN for coordinates outside the raster.
+
+    Sections can sit beyond the DEM footprint (the guard marks those samples as
+    invalid); returning NaN here keeps the sampler from raising IndexError.
+    """
+    if 0 <= row < dem_data.shape[0] and 0 <= col < dem_data.shape[1]:
+        return dem_data[row][col]
+    return np.float32(np.nan)
+
+
 # get the elevation of the 4 pixel coors
-def get_elevation(interpolated_coors, dataset):
-    Z = []
-    band = dataset.GetRasterBand(1)
-    dem_data = band.ReadAsArray(0, 0, dataset.RasterXSize, dataset.RasterYSize).astype(
-        np.float32
-    )
+def get_elevation(interpolated_coors, dataset, dem_data=None):
+    if dem_data is None:
+        band = dataset.GetRasterBand(1)
+        dem_data = band.ReadAsArray(
+            0, 0, dataset.RasterXSize, dataset.RasterYSize
+        ).astype(np.float32)
     dem_data = np.array(dem_data)
+    Z = []
     for interpolated_coor in interpolated_coors:
-        z1 = dem_data[interpolated_coor[1]][interpolated_coor[0]]
-        z2 = dem_data[interpolated_coor[3]][interpolated_coor[2]]
-        z3 = dem_data[interpolated_coor[5]][interpolated_coor[4]]
-        z4 = dem_data[interpolated_coor[7]][interpolated_coor[6]]
+        z1 = _safe_dem_value(dem_data, interpolated_coor[1], interpolated_coor[0])
+        z2 = _safe_dem_value(dem_data, interpolated_coor[3], interpolated_coor[2])
+        z3 = _safe_dem_value(dem_data, interpolated_coor[5], interpolated_coor[4])
+        z4 = _safe_dem_value(dem_data, interpolated_coor[7], interpolated_coor[6])
         Z.append([z1, z2, z3, z4])
     return Z
 
@@ -282,11 +426,14 @@ def get_sample_points_vec3(dataset, section_geometry, num_points=100):
     width = dataset.RasterXSize
     height = dataset.RasterYSize
     interpolated_coors = get_interpolated_pixel_index(image_coors, width, height)
-    # the elevation of the 4 pixel coors
-    Z = get_elevation(interpolated_coors, dataset)
+    # the elevation of the 4 pixel coors (read the raster once, reuse the array)
+    dem_data, valid_pixels = _load_dem_and_valid_mask(dataset)
+    Z = get_elevation(interpolated_coors, dataset, dem_data)
+    # per-sample contribution of the 4 bilinear corners, used by the nodata guard
+    point_valid = _pixel_quad_validity(interpolated_coors, valid_pixels)
     # the vec3 of sample points
     sample_points_vec3 = bilinear_interpolation(image_coors, Z, sample_points)
-    return sample_points_vec3, sample_points, step
+    return sample_points_vec3, sample_points, step, point_valid
 
 
 def sample_by_points(dataset, points):
@@ -321,9 +468,58 @@ def section_view(dem_path, section_geometry, output_path):
 
     geometry = copy.deepcopy(section_geometry)
     num_points = 100
-    sample_points_vec3, scatters, step = get_sample_points_vec3(
+    sample_points_vec3, scatters, step, point_valid = get_sample_points_vec3(
         dataset, geometry, num_points
     )
+
+    # ---- nodata guard -------------------------------------------------------
+    # Keep only the longest continuously valid stretch of the section. Sampling
+    # keeps the original spacing (`step`), so the trimmed array stays
+    # index-consistent with every downstream consumer of section.json.
+    total_points = len(point_valid)
+    valid_points = int(sum(point_valid))
+    run_start, run_end = _longest_valid_run(point_valid)
+    run_points = run_end - run_start + 1 if run_end >= run_start else 0
+    run_length_m = step * (run_points - 1) if run_points >= 2 else 0.0
+    # `MIN_VALID_LENGTH_M` states how much usable data a section must retain - it is
+    # a loss budget, not an absolute requirement. Capping it by the section's own
+    # full length keeps the guard a strict no-op for a *complete* profile: a short
+    # but fully valid section is what the model was always meant to consume, so it
+    # must not be rejected for "only" being 35 m long. Only sections that lost data
+    # (run shorter than the whole profile) are held to the absolute floor.
+    full_length_m = step * (total_points - 1) if total_points >= 2 else 0.0
+    required_length_m = min(MIN_VALID_LENGTH_M, full_length_m)
+    data_quality = {
+        "sample_points": total_points,
+        "valid_points": valid_points,
+        "nodata_points": total_points - valid_points,
+        "valid_ratio": round(valid_points / total_points, 4) if total_points else 0.0,
+        "valid_run_points": run_points,
+        "valid_run_length_m": round(float(run_length_m), 2),
+        "full_length_m": round(float(full_length_m), 2),
+        "min_valid_length_m": MIN_VALID_LENGTH_M,
+        "required_length_m": round(float(required_length_m), 2),
+        "trimmed": run_points < total_points,
+        "trim_range": [run_start, run_end] if run_points else None,
+    }
+
+    if run_points < MIN_VALID_POINTS or run_length_m < required_length_m:
+        raise DemCoverageError(
+            "DEM_COVERAGE_INSUFFICIENT",
+            (
+                f"the longest continuously valid stretch of this section is only "
+                f"{run_length_m:.1f} m ({valid_points}/{total_points} usable sample "
+                f"points, {total_points - valid_points} nodata) out of a "
+                f"{full_length_m:.1f} m section, below the required "
+                f"{required_length_m:.1f} m. The DEM has no data around this section - "
+                f"check the DEM coverage / pick a section that falls on valid cells"
+            ),
+            data_quality,
+        )
+
+    if run_points < total_points:
+        sample_points_vec3 = sample_points_vec3[run_start : run_end + 1]
+        scatters = scatters[run_start : run_end + 1]
 
     # Calculate the slope ratio of 2 adjacent sample points
     Sa = computeSaIndex(sample_points_vec3, step)
@@ -336,6 +532,23 @@ def section_view(dem_path, section_geometry, output_path):
     # Calculate the points and their heigh that the erosion model focuses
     if len(scatters) < 2:
         raise SystemError("Section scatter points are insufficient")
+
+    # The vertical-profile walk below starts at `deepest_index` and only moves
+    # leftwards, so a deepest sample sitting on the first index leaves no
+    # left-bank slope and silently empties `points_v`/`Sa_v`. That is a data
+    # geometry problem, not a recoverable one - fail with a clear reason.
+    if deepest_index <= 0:
+        raise DemCoverageError(
+            "SECTION_PROFILE_DEGENERATE",
+            (
+                f"the deepest valid sample is the first point of the usable stretch "
+                f"({data_quality['valid_run_length_m']} m spanning sample "
+                f"{run_start}..{run_end} of {total_points}), so no left-bank slope can "
+                f"be derived. The usable part of this section is off-centre - extend the "
+                f"section across the full channel or check the DEM coverage"
+            ),
+            data_quality,
+        )
 
     verified_end_index = deepest_index
     if verified_end_index <= 0:
@@ -410,9 +623,27 @@ def section_view(dem_path, section_geometry, output_path):
             i += 1
     Sa_v = computeSaIndex_v(sample_v_points)
     if not Sa_v:
-        slope_foot_index = 1
-    else:
-        slope_foot_index = Sa_v.index(min(Sa_v)) + 1
+        # Previously this silently fell back to `slope_foot_index = 1`, which let
+        # `heightDifference` report a bogus worst-case risk and only blew up later
+        # inside `slopeRate`/`waterLevelFluctuation`/`antiImpactSpeed`.
+        if end_height > 0:
+            reason = (
+                f"the deepest sample of this section is still at {end_height:.2f} m, "
+                f"i.e. above the water-surface datum - the section appears to lie on dry "
+                f"land / outside the modelled channel rather than crossing the riverbed"
+            )
+        else:
+            reason = (
+                f"no point was found between start height {start_height} and bed height "
+                f"{end_height} within the usable stretch "
+                f"({data_quality['valid_run_length_m']} m)"
+            )
+        raise DemCoverageError(
+            "SECTION_VERTICAL_PROFILE_EMPTY",
+            f"the vertical profile of this section is empty: {reason}",
+            data_quality,
+        )
+    slope_foot_index = Sa_v.index(min(Sa_v)) + 1
 
     # helper for converting numeric to native python type
     def to_native(obj):
@@ -450,6 +681,7 @@ def section_view(dem_path, section_geometry, output_path):
         "points_er": points_er,
         "step_er_verified": step_er_verified,
         "step_er": step_er,
+        "data_quality": data_quality,
     }
     with open(output_raw_path, "w", encoding="utf-8") as f:
         json.dump(raw_res, f, indent=4)
@@ -469,6 +701,49 @@ def section_view(dem_path, section_geometry, output_path):
         "raw-file": "section.json",
         "interval": step,
     }
+
+
+def _failure_code_of(exception):
+    """把异常翻成一个稳定的错误码。
+
+    ``DemCoverageError`` 这类业务异常自带 ``.code``（DEM_COVERAGE_INSUFFICIENT /
+    SECTION_PROFILE_DEGENERATE / SECTION_VERTICAL_PROFILE_EMPTY），直接用；
+    其余异常没有码，退化成类名（TypeError / SystemError / ...），
+    至少还能区分「几何格式不对」和「采样点不足」。
+    """
+    code = getattr(exception, "code", None)
+    if isinstance(code, str) and code.strip():
+        return code.strip()
+    return type(exception).__name__
+
+
+def _write_failure_response(mcr: model.ModelCaseReference, exception):
+    """失败时把原因写进 response.json，而不是只留 RESPONSING 写下的 "NONE"。
+
+    时序上 RESPONSING 在模型子进程启动**之前**就把占位模板落盘了；子进程随后失败时，
+    变的只有 status / runtime，response.json 仍是那堆 "NONE"。调用方拿到的是一个
+    「看起来正常、内容全空」的响应，只能把 "NONE" 当文件名去取，真正的失败原因
+    （DEM 无数据 / 剖面退化）就此在链路里丢失，最后只剩一句 404。
+
+    这里补两个字段：error-code（稳定、可被上游分类）与 error-message（可读原因）。
+    """
+    try:
+        mcr.make_response(
+            {
+                "case-id": mcr.id,
+                "raw-json": "NONE",
+                "visualization-txt": "NONE",
+                "interval": "NONE",
+                "error-code": _failure_code_of(exception),
+                "error-message": str(exception),
+            }
+        )
+    except Exception as response_exception:  # pragma: no cover
+        # 落盘失败不能盖掉原始异常：那会让调用方看到"写响应失败"而不是真正的原因。
+        _debug_log(
+            "failure_response_write_failed",
+            {"case_id": mcr.id, "error": str(response_exception)},
+        )
 
 
 ##########################################################################################
@@ -512,13 +787,20 @@ def run_section_view_mcr(mcr: model.ModelCaseReference):
     if section_geometry.get("type") == "FeatureCollection":
         raise TypeError("Feature Collection Is Not Allowed")
 
-    result = section_view(dem_path, section_geometry, output_path)
+    try:
+        result = section_view(dem_path, section_geometry, output_path)
+    except Exception as exception:
+        # 剖面计算是本模型唯一会因数据质量失败的地方（nodata 覆盖率不足 / 剖面退化 /
+        # 垂线剖面为空），失败原因必须落到响应里，否则上游只能看到占位 "NONE"。
+        _write_failure_response(mcr, exception)
+        raise
 
     raw_json_path = os.path.join(output_path, result["raw-file"])
     slope_foot_index = None
     deepest_index = None
     sample_v_count = None
     sa_v_count = None
+    data_quality = None
     if os.path.exists(raw_json_path):
         with open(raw_json_path, "r", encoding="utf-8") as file:
             raw_data = json.load(file)
@@ -526,6 +808,7 @@ def run_section_view_mcr(mcr: model.ModelCaseReference):
         deepest_index = raw_data.get("deepest_index")
         sample_v_count = len(raw_data.get("points_v") or [])
         sa_v_count = len(raw_data.get("Sa_v") or [])
+        data_quality = raw_data.get("data_quality")
 
     _debug_log(
         "result_summary",
@@ -537,6 +820,7 @@ def run_section_view_mcr(mcr: model.ModelCaseReference):
             "slope_foot_index": slope_foot_index,
             "sample_v_count": sample_v_count,
             "sa_v_count": sa_v_count,
+            "data_quality": data_quality,
         },
     )
 
