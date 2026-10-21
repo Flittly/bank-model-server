@@ -93,8 +93,18 @@ def get_mapped_tidal_level_and_mapped_water_qs(
     return mapped_tidal_level, mapped_water_qs, segment_name, year, set_name
 
 
+# 回归式：Ky = 2.4231 * exp(-0.547 * max_v)。2.4231 是**前因子**（max_v -> 0 的取值），
+# 不是「算不出来时的默认值」——所以只要看到所有断面 Ky 都恰好等于 2.4231，
+# 就等价于「max_v 恒为 0」，即流速全部没取到。
+KY_INTERCEPT = 2.4231
+KY_DECAY = 0.547
+
+# `hydrodynamic_data` 里 u/v 的缺失哨兵是 -99999
+NODATA_LIMIT = -999.0
+
+
 def calculate_velocity(x, y):
-    if x <= -999.0 or y <= -999.0:
+    if x <= NODATA_LIMIT or y <= NODATA_LIMIT:
         x = 0.0
         y = 0.0
 
@@ -112,11 +122,31 @@ def compute_anti_impact_speed(result, risk_threshold):
     us = result["us"]
     vs = result["vs"]
     velocities = []
+    nodata_samples = 0
     for i in range(len(us)):
+        if us[i] <= NODATA_LIMIT or vs[i] <= NODATA_LIMIT:
+            nodata_samples += 1
         velocities.append(calculate_velocity(us[i], vs[i]))
 
     max_v = max(velocities)
-    Ky = 2.4231 * exp(-0.547 * max_v)
+    Ky = KY_INTERCEPT * exp(-KY_DECAY * max_v)
+
+    # 「有没有取到流速」必须随结果一起上报，否则下游只能看到一个似真的 Ky。
+    data_quality = {
+        "samples": len(velocities),
+        "nodata_samples": nodata_samples,
+        "max_velocity": max_v,
+        "velocity_available": nodata_samples < len(velocities),
+    }
+    if velocities and not data_quality["velocity_available"]:
+        # 全时段 nodata：max_v 只能是 0，于是 Ky 退化成前因子 2.4231，再被判成第 1 档
+        # （最轻）。「没有数据」被读成「最安全」是最坏的一种静默。这里不抛错 ——
+        # riskLevel 会因为拿不到数值矩阵而整条断面失败 —— 所以至少要留下痕迹。
+        print(
+            f"[anti-impact-speed][warn] all {nodata_samples} samples are nodata, "
+            f"Ky falls back to the regression intercept {KY_INTERCEPT}",
+            flush=True,
+        )
 
     if Ky > risk_threshold[0]:
         risk = [1, 0, 0, 0]
@@ -127,7 +157,7 @@ def compute_anti_impact_speed(result, risk_threshold):
     elif Ky <= risk_threshold[2]:
         risk = [0, 0, 0, 1]
 
-    return Ky, risk
+    return Ky, risk, data_quality
 
 
 def get_flow_field_velocity(series):
@@ -168,9 +198,21 @@ def run_anti_impact_speed_mcr(mcr: model.ModelCaseReference):
 
     risk_threshold = mcr.request_json["risk-threshold"]
 
-    Ky, risk = compute_anti_impact_speed(result, risk_threshold)
+    Ky, risk, data_quality = compute_anti_impact_speed(result, risk_threshold)
 
-    return {"case-id": mcr.id, "Ky": Ky, "risk-level": risk}
+    print(
+        f"[anti-impact-speed][debug] slope_foot=({slope_foot[0]}, {slope_foot[1]}) "
+        f"max_v={data_quality['max_velocity']} Ky={Ky} "
+        f"nodata={data_quality['nodata_samples']}/{data_quality['samples']}",
+        flush=True,
+    )
+
+    return {
+        "case-id": mcr.id,
+        "Ky": Ky,
+        "risk-level": risk,
+        "data-quality": data_quality,
+    }
 
 
 ##########################################################################################

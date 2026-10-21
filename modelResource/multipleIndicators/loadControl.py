@@ -8,19 +8,35 @@ if module_path not in sys.path:
 import model
 import config
 
-def compute_load_control(protection_level):
-    
-    risk = []
+# 工程扰动控制等级枚举 -> 档位。1 档 = 控制最严格 = 风险最低；4 档 = 无控制 = 风险最高。
+# 注意：与 Slope Protection 用的是两套字符串（这里用 strict 表示「强」，那边用 systemic）。
+CONTROL_LEVEL_TIERS = {
+    "strict": 1,
+    "normal": 2,
+    "low": 3,
+    "no": 4,
+}
 
-    if protection_level == "strict":
-        risk = [1,0,0,0]
-    elif protection_level == "normal":
-        risk = [0,1,0,0]
-    elif protection_level == "low":
-        risk = [0,0,1,0]
-    elif protection_level == "no":
-        risk = [0,0,0,1]
 
+def normalize_level(level):
+    return level.strip().lower() if isinstance(level, str) else ""
+
+
+def compute_load_control(control_level):
+    """把工程扰动控制等级枚举映射成 one-hot 档位向量 [1档,2档,3档,4档]。
+
+    非法值（None / 空串 / 未知枚举）必须抛异常，不允许静默兜底：
+    兜底成第 1 档等于把「未填报」当成「控制最严格」，会让风险等级凭空偏低且无从察觉。
+    """
+    level = normalize_level(control_level)
+    if level not in CONTROL_LEVEL_TIERS:
+        raise ValueError(
+            "invalid control-level: %r; expect one of %s"
+            % (control_level, sorted(CONTROL_LEVEL_TIERS))
+        )
+
+    risk = [0, 0, 0, 0]
+    risk[CONTROL_LEVEL_TIERS[level] - 1] = 1
     return risk
     
 ##########################################################################################
@@ -32,10 +48,16 @@ def run_load_control_mcr(mcr: model.ModelCaseReference):
 
     risk = compute_load_control(control_level)
 
+    # LC 是枚举输入、没有连续量，早期版本只回 risk-level，导致上游 riskLevel.py 的
+    # raw_values["LC"] 恒为 None、结果页只能显示 N/A。这里显式回带原始枚举与档位。
+    level = normalize_level(control_level)
+
     return {
         
         'case-id': mcr.id,
-        'risk-level': risk
+        'risk-level': risk,
+        'LC': level,
+        'risk-tier': CONTROL_LEVEL_TIERS[level],
     }
     
 ##########################################################################################

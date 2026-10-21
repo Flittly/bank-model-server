@@ -8,19 +8,35 @@ if module_path not in sys.path:
 import model
 import config
 
+# 护岸等级枚举 -> 档位。1 档 = 护岸最强 = 风险最低；4 档 = 无护岸 = 风险最高。
+PROTECTION_LEVEL_TIERS = {
+    "systemic": 1,
+    "normal": 2,
+    "low": 3,
+    "no": 4,
+}
+
+
+def normalize_level(level):
+    return level.strip().lower() if isinstance(level, str) else ""
+
+
 def compute_slope_protection(protection_level):
-    
-    risk = []
+    """把护岸等级枚举映射成 one-hot 档位向量 [1档,2档,3档,4档]。
 
-    if protection_level == "systemic":
-        risk = [1,0,0,0]
-    elif protection_level == "normal":
-        risk = [0,1,0,0]
-    elif protection_level == "low":
-        risk = [0,0,1,0]
-    elif protection_level == "no":
-        risk = [0,0,0,1]
+    非法值（None / 空串 / 未知枚举）必须抛异常，不允许静默兜底：
+    兜底成第 1 档等于把「未填报」当成「护岸最强」，会让风险等级凭空偏低且无从察觉，
+    这正是本次 PL/LC 问题的同款错误。
+    """
+    level = normalize_level(protection_level)
+    if level not in PROTECTION_LEVEL_TIERS:
+        raise ValueError(
+            "invalid protection-level: %r; expect one of %s"
+            % (protection_level, sorted(PROTECTION_LEVEL_TIERS))
+        )
 
+    risk = [0, 0, 0, 0]
+    risk[PROTECTION_LEVEL_TIERS[level] - 1] = 1
     return risk
     
 ##########################################################################################
@@ -32,10 +48,16 @@ def run_slope_protection_mcr(mcr: model.ModelCaseReference):
 
     risk = compute_slope_protection(protection_level)
 
+    # PL 是枚举输入、没有连续量，早期版本只回 risk-level，导致上游 riskLevel.py 的
+    # raw_values["PL"] 恒为 None、结果页只能显示 N/A。这里显式回带原始枚举与档位。
+    level = normalize_level(protection_level)
+
     return {
         
         'case-id': mcr.id,
-        'risk-level': risk
+        'risk-level': risk,
+        'PL': level,
+        'risk-tier': PROTECTION_LEVEL_TIERS[level],
     }
     
 ##########################################################################################

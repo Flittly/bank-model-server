@@ -88,7 +88,15 @@ def get_mapped_tidal_level_and_mapped_water_qs(
     return mapped_tidal_level, mapped_water_qs, segment_name, year, set_name
 
 
-def get_risk_level(response_list, wRE, wNM, wGE, wRL, risk_threshold):
+def _one_hot_tier(column):
+    """从某个指标在 4 个档位上的取值（如 [0,0,1,0]）反推它落在第几档；全 0 返回 None。"""
+    values = [float(v) for v in column]
+    if not any(values):
+        return None
+    return values.index(max(values)) + 1
+
+
+def get_risk_level(response_list, wRE, wNM, wGE, wRL, risk_threshold, request_json=None):
     with open(
         config.DIR_RESOURCE_RISKLEVEL_THRESHOLD_TEMPLATE, "r", encoding="utf-8"
     ) as file:
@@ -125,11 +133,18 @@ def get_risk_level(response_list, wRE, wNM, wGE, wRL, risk_threshold):
         slope_protection_risk_level_matrix = np.array(
             [slope_protection_data.get("risk-level")]
         )
+        # PL/LC 是枚举输入，早期 Slope Protection / Load Control 的响应只回 risk-level、
+        # 不回带原始枚举，导致这里恒为 None。旧 case 重跑时从请求入参回退，
+        # 新 case 直接用模型回带的字段。
         raw_PL = slope_protection_data.get("PL")
+        if raw_PL is None and isinstance(request_json, dict):
+            raw_PL = request_json.get("protection-level")
     with open(load_control_mcr_response, "r", encoding="utf-8") as file:
         load_control_data = json.load(file)
         load_control_risk_level_matrix = np.array([load_control_data.get("risk-level")])
         raw_LC = load_control_data.get("LC")
+        if raw_LC is None and isinstance(request_json, dict):
+            raw_LC = request_json.get("control-level")
     with open(height_difference_response, "r", encoding="utf-8") as file:
         height_difference_data = json.load(file)
         height_difference_risk_level_matrix = np.array(
@@ -270,6 +285,31 @@ def get_risk_level(response_list, wRE, wNM, wGE, wRL, risk_threshold):
         "Zd": raw_Zd,
     }
 
+    # 输入完备度：回答「这 9 个指标里到底有几个真的在区分断面」。
+    # 单断面只能给出本断面的档位；跨断面的「是否为常量」由统计层按 indicator_tiers 判断。
+    indicator_tiers = {
+        "Ky": _one_hot_tier(water_flow_power_matrix[:, 0]),
+        "PQ": _one_hot_tier(water_flow_power_matrix[:, 1]),
+        "Zd": _one_hot_tier(water_flow_power_matrix[:, 2]),
+        "Sa": _one_hot_tier(riverbed_evolution_matrix[:, 0]),
+        "Ln": _one_hot_tier(riverbed_evolution_matrix[:, 1]),
+        "Zb": _one_hot_tier(riverbed_evolution_matrix[:, 2]),
+        "Dsed": _one_hot_tier(geology_engineering_matrix[:, 0]),
+        "PL": _one_hot_tier(geology_engineering_matrix[:, 1]),
+        "LC": _one_hot_tier(geology_engineering_matrix[:, 2]),
+    }
+    matrices["indicator_tiers"] = indicator_tiers
+    matrices["input_completeness"] = {
+        "total_indicators": len(indicator_tiers),
+        "resolved_indicators": sum(1 for t in indicator_tiers.values() if t is not None),
+        "missing_raw_values": sorted(k for k, v in raw_values.items() if v is None),
+        "enum_inputs": ["PL", "LC"],
+    }
+    # PQ 溯源：用了哪一年、哪个文件、是否精确命中。全库 PQ 恒为 0.0 时，
+    # 只有把这三件事落进结果，才能区分「数据没接上」和「这一年的当量本来就是 0」。
+    if isinstance(flow_equivalent_data, dict) and flow_equivalent_data.get("data-quality"):
+        matrices["PQ_data_quality"] = flow_equivalent_data["data-quality"]
+
     return risk_value[0], risk, matrices, raw_values
 
 
@@ -332,7 +372,7 @@ def run_risk_level_mcr(mcr: model.ModelCaseReference):
         wRL = mcr.request_json["wRL"]
 
     result, risk_level, matrices, raw_values = get_risk_level(
-        response_list, wRE, wNM, wGE, wRL, risk_threshold
+        response_list, wRE, wNM, wGE, wRL, risk_threshold, mcr.request_json
     )
 
     input_thresholds = mcr.request_json.get("risk-thresholds")
@@ -383,6 +423,15 @@ def PARSING(
     set = request_json["set"]
     water_qs = request_json["water-qs"]
     tidal_level = request_json["tidal-level"]
+
+    # PQ 用断面自身的岸段与年份，必须在映射前留一份。
+    # get_mapped_* 为了对齐水动力工况会把 segment 改成 DEFAULT_DOMAIN、把 year 改成 "default"
+    # （该岸段/潮位组合没有水动力节点时），那是「工况坐标」，不是「断面的年份」。
+    # 之前直接把映射后的 year 传给 PQ，导致 2018 年的断面拿到 "default" 再被字符串夹取成 2023，
+    # 于是全库 PQ 恒为 pq.json["2023"] = 0.0。
+    pq_segment = segment
+    pq_year = year
+
     mapped_tidal_level, mapped_water_qs, segment, year, set = (
         get_mapped_tidal_level_and_mapped_water_qs(
             segment, year, set, tidal_level, water_qs
@@ -438,8 +487,9 @@ def PARSING(
     }
 
     flow_equivalent_json = {
-        "segment": segment,
-        "year": year,
+        # 用断面原始岸段/年份（映射前），不要用对齐工况后的 segment/year
+        "segment": pq_segment,
+        "year": pq_year,
         "risk-threshold": risk_threshold_PQ,
     }
 
