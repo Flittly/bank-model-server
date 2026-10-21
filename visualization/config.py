@@ -8,10 +8,15 @@ from typing import Optional
 from dataclasses import dataclass, asdict
 
 # 强制 UTF-8 输出（Windows 兼容）
+# 用 reconfigure 原地调整编码，不要新建 TextIOWrapper 覆盖 sys.stdout：
+# 覆盖会让原流失去引用，在 pytest 等已经替换过 sys.stdout 的场景下，
+# 旧流被 GC 关闭后会在测试框架收尾时抛 "I/O operation on closed file"。
 if sys.platform == 'win32':
-    import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding='utf-8')
+        except Exception:
+            pass
 
 import matplotlib
 matplotlib.use('Agg')
@@ -22,19 +27,89 @@ plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'WenQuanYi Micro
 plt.rcParams['axes.unicode_minus'] = False
 
 # 风险等级颜色配置
+# 键 = bank_risk_results.risk_level，即模型侧 one-hot 索引+1，取值 1..4（1 最低、4 最高）。
+# 依据：kafka_executor._normalize_risk_level 与 TaskExecutionService.toRiskLevel 均为
+#       「one-hot 中为 1 的下标 + 1」；0 表示解析失败/未知。
+# ⚠ 别照抄前端 ResultPage 的 0-3 表：前端是对 indicators.result（0~1 浮点）自行分档
+#   （<0.25→0, <0.5→1, <0.75→2, else→3），输入不同、起点不同。
+#   两套语义同向（数值越大风险越高），所以这里的键 = 前端 level + 1，色值保持一致。
+#
+# 色值唯一真源：`bank-warning-web/src/utils/riskScoring.ts` 的 RISK_COLORS
+# （2026-10-20 定稿：一级红 / 二级橙 / 三级蓝 / 低风险绿）。出图与页面必须逐值相同，
+# 否则同一份结果在报告里和在页面上是两种颜色。改色请两边一起改。
 RISK_COLORS = {
-    1: '#2ecc71',  # 绿色 - 低风险
-    2: '#f39c12',  # 橙色 - 中低风险
-    3: '#e74c3c',  # 红色 - 中高风险
-    4: '#8e44ad',  # 紫色 - 高风险
+    1: '#10b981',  # 绿色 - 低风险（页面同样不着色，见 RISK_RENDERED_LEVELS）
+    2: '#3b82f6',  # 蓝色 - 三级风险（前端 level 1）
+    3: '#f97316',  # 橙色 - 二级风险（前端 level 2）
+    4: '#ef4444',  # 红色 - 一级风险（前端 level 3）
 }
 
 RISK_LABELS = {
     1: '低风险',
-    2: '中低风险',
-    3: '中高风险',
-    4: '高风险',
+    2: '一般风险',
+    3: '高风险',
+    4: '极高风险',
 }
+
+#: 出图时**真正着色**的等级。与页面口径一致（sectionRenderVisibility.ts）：
+#:   - `risk_level` 1 = 低风险（页面显示等级 0）→ 不渲染、不着色；
+#:   - 缺失 / 0 / 非整数 = 未计算或计算失败 → 不渲染、不着色。
+#: 只画 2/3/4，即页面上的一级、二级、三级风险。
+RISK_RENDERED_LEVELS = (2, 3, 4)
+
+#: 图例条目（等级从高到低，与页面「一级/二级/三级」的叫法一致）。
+RISK_LEGEND = (
+    (4, '一级风险'),
+    (3, '二级风险'),
+    (2, '三级风险'),
+)
+
+#: 等级缺失/未知（0 或 NULL）时的兜底色
+DEFAULT_RISK_COLOR = '#94a3b8'
+
+#: 出图支持的最高风险等级
+RISK_LEVEL_MAX = 4
+
+
+def risk_color(section_or_level) -> str:
+    """取风险颜色。可传断面 dict（读 risk_level）或直接传等级值。
+
+    0 / None / 非法值视为「未知」，返回灰色兜底；
+    超过 4 的值按最高档处理并告警，避免静默画成灰色而看不出数据异常。
+    """
+    level = section_or_level.get('risk_level') if isinstance(section_or_level, dict) else section_or_level
+    try:
+        level = int(level)
+    except (TypeError, ValueError):
+        return DEFAULT_RISK_COLOR
+    if level > RISK_LEVEL_MAX:
+        import logging
+        logging.getLogger(__name__).warning(
+            '风险等级 %s 超出出图口径 1-%d，已按最高档着色', level, RISK_LEVEL_MAX)
+        level = RISK_LEVEL_MAX
+    if level < 1:
+        return DEFAULT_RISK_COLOR
+    return RISK_COLORS.get(level, DEFAULT_RISK_COLOR)
+
+
+def is_rendered_level(level) -> bool:
+    """该等级是否要在图上着色。
+
+    只认 :data:`RISK_RENDERED_LEVELS`（2/3/4）。``None``、0、非整数、越界一律 False ——
+    刻意不把非法值兜底成某个等级：兜底等于把「没算」画成「算出来了」，
+    而页面（sectionRenderVisibility.ts）正是把这类断面整段留空的。
+    """
+    if level is None or isinstance(level, bool):
+        return False
+    try:
+        value = float(level)
+    except (TypeError, ValueError):
+        return False
+    if not (value == value and value not in (float('inf'), float('-inf'))):  # NaN / inf
+        return False
+    if value != int(value):
+        return False
+    return int(value) in RISK_RENDERED_LEVELS
 
 # 图表样式配置
 CHART_STYLE = {
