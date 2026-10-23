@@ -1,7 +1,8 @@
 """岸段色带的配色与可见性契约（2026-10-21）。
 
-需求：出图配色与前端页面**完全一致**；色带只显示一级/二级/三级风险三档；
-低风险（``risk_level`` 1）与未计算（无风险值）**不渲染、不着色**。
+需求：出图配色与前端页面**完全一致**；色带只显示 ``risk_level`` 2/3/4 三档
+（页面上的一级/二级/三级风险）；低风险（``risk_level`` 1）与未计算（无风险值）
+**不渲染、不着色**。
 
 三条契约分别由下面三组测试守着：
 
@@ -93,10 +94,14 @@ def test_palette_equals_frontend_risk_colors():
 
 
 def test_rendered_levels_match_frontend_visibility():
-    """页面 only 画显示等级 1..3（= risk_level 2..4），出图必须是同一组。"""
+    """页面 only 画显示等级 1..3（= risk_level 2..4），出图着色必须是同一组。
+
+    图例**不必**与着色档数一致：2026-10-21 起最高档（4，红）按需求不进图例，
+    另两档文案改为「高风险 / 中风险」。这里把着色口径与图例口径分开断言。
+    """
     assert RISK_RENDERED_LEVELS == (2, 3, 4)
-    assert [level for level, _ in RISK_LEGEND] == [4, 3, 2]
-    assert [label for _, label in RISK_LEGEND] == ['一级风险', '二级风险', '三级风险']
+    assert [level for level, _ in RISK_LEGEND] == [3, 2]
+    assert [label for _, label in RISK_LEGEND] == ['高风险', '中风险']
 
 
 @pytest.mark.parametrize('level', [2, 3, 4, 2.0, '3'])

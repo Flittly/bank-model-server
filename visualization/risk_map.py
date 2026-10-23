@@ -1,13 +1,15 @@
 """
 岸段风险分布图生成器
 在地图上按断面风险等级沿程插值显示岸段风险分布
-支持遥感影像底图、DEM 底图、比例尺、指北针
+支持遥感影像底图、比例尺、指北针
 
 图层自下而上（zorder）：
     -10  遥感影像底图（basemap.py，可选）
-      0  DEM 灰度底图（可选）
       1  经纬网
       2  岸段风险色带（由断面风险等级沿程插值着色；断面本身不画）
+
+⚠ DEM 灰度底图（原 zorder=0）自 2026-10-21 起**缺省不画**，见
+  :data:`RENDER_DEM_BASEMAP`；保留相关函数与 ``dem_path`` 参数只为兼容载荷。
 
 断面数据仍参与：岸段色带的插值 stop、稀疏区段判定、取景范围与统计口径
 都来自断面——只是不再把断面线/端点画到图上。
@@ -17,7 +19,6 @@ import json
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from matplotlib.collections import LineCollection
-from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
 import numpy as np
 from typing import List, Optional
@@ -58,6 +59,15 @@ MAX_DEM_PIXELS = 4_000_000
 DEM_TARGET_RES_DEG = 0.0002
 #: 计算 vmin/vmax 时参与统计的抽样点上限（与全量相比差异远小于 1%）
 DEM_PERCENTILE_SAMPLES = 200_000
+
+#: 是否把 DEM 灰度高程衬底画到图上。
+#:
+#: 2026-10-21 需求：**图上不再显示 DEM**（「可以不显示 DEM，其他的不变」）。
+#: 置 False 后连 ``load_dem_basemap`` 都不会被调用 —— 不再读 GDAL、不再 Warp、
+#: 不再吃那份内存，但仍保留 ``dem_path`` 参数与相关函数：Java 侧载荷里的
+#: ``dem_path`` 不动（免得改协议），将来要恢复只改这一个开关。
+#: 其余图层（遥感影像底图 / 岸段色带 / 经纬网 / 比例尺 / 指北针 / 图例）一律不变。
+RENDER_DEM_BASEMAP = False
 
 
 def _fit_raster_size(lng_span: float, lat_span: float,
@@ -136,7 +146,7 @@ def _draw_bank_gradients(ax, banks, sections, gap_meters=None, report=None) -> i
     配色与可见性口径**与页面完全一致**（色值真源 `riskScoring.ts`，
     可见性口径 `sectionRenderVisibility.ts`）：
 
-    * 只画 ``risk_level`` 2/3/4（页面上的三级/二级/一级风险）；
+    * 只画 ``risk_level`` 2/3/4（蓝 / 橙 / 红三档）；
     * ``risk_level`` 1（低风险）与缺失/未知（未计算、计算失败）**不画**——
       不是画成透明色，而是整段不生成 LineCollection，让底图自然透出；
     * 每条断面管辖「与前后断面中点之间」的那段岸线，区间内**纯色**
@@ -152,7 +162,7 @@ def _draw_bank_gradients(ax, banks, sections, gap_meters=None, report=None) -> i
     :param gap_meters: 「内插/外推」区段的间距阈值（米）；
                        None 表示按该岸段断面的实际密度自适应（推荐，见 adaptive_gap_threshold）。
     :param report: 可选 dict；会写入 ``sparse_segments``（实画的虚线区段数），
-                   供调用方决定图例里要不要出现「内插/外推区段」这一项。
+                   仅用于日志核对（2026-10-21 起图例不再列「内插/外推区段」一项）。
                    另写入 ``hidden_sections``（因低风险/无风险值而未着色的断面数）。
     """
     if not banks:
@@ -546,12 +556,14 @@ def generate_risk_map_tiles(risk_data: List[dict],
                             dem_path: Optional[str] = None,
                             banks: Optional[List[dict]] = None,
                             gap_meters: Optional[float] = None,
-                            basemap: Optional[dict] = None) -> str:
+                            basemap: Optional[dict] = None,
+                            render_dem: bool = RENDER_DEM_BASEMAP) -> str:
     """分幅出图：把一幅完整地图按经纬度切成 rows×cols 幅子图。
 
     每幅子图都是**完整的地图**——各自的等比例画布、标题、图例、比例尺、指北针、
-    经纬网、底图/DEM 与岸段插值色带一样不缺；只有显示范围不同（子图窗口），
+    经纬网、底图与岸段插值色带一样不缺；只有显示范围不同（子图窗口），
     越界内容由 matplotlib 自动裁剪，岸段颜色仍按整条几何插值计算（不受分幅影响）。
+    DEM 底图与单图同口径：缺省不画（见 :data:`RENDER_DEM_BASEMAP`）。
 
     :param rows: 纬度方向分块数（1 = 不分）
     :param cols: 经度方向分块数（1 = 不分）
@@ -564,7 +576,7 @@ def generate_risk_map_tiles(risk_data: List[dict],
         return generate_risk_distribution_map(
             risk_data, title, output_dir, output_name,
             dem_path=dem_path, banks=banks, gap_meters=gap_meters,
-            basemap=basemap)
+            basemap=basemap, render_dem=render_dem)
 
     sections = [item for item in risk_data
                 if item.get('start_lng') and item.get('start_lat')]
@@ -588,10 +600,10 @@ def generate_risk_map_tiles(risk_data: List[dict],
         print(f"[viz] 分幅 ({r},{c}) lng=[{w:.4f},{e:.4f}] lat=[{s:.4f},{n:.4f}]"
               f" 范围内断面 {inside} 条", flush=True)
         single = json.loads(generate_risk_distribution_map(
-            risk_data, f'{title}（第 {r * cols + c + 1}/{rows * cols} 幅）',
+            risk_data, title,
             output_dir, _tile_output_name(stem, r, c, multi=True),
             dem_path=dem_path, banks=banks, gap_meters=gap_meters,
-            basemap=basemap, bbox=tile['bbox']))
+            basemap=basemap, bbox=tile['bbox'], render_dem=render_dem))
         single['row'] = r
         single['col'] = c
         single['bbox'] = [w, s, e, n]
@@ -626,7 +638,8 @@ def generate_risk_distribution_map(
     banks: Optional[List[dict]] = None,
     gap_meters: Optional[float] = None,
     basemap: Optional[dict] = None,
-    bbox: Optional[tuple] = None
+    bbox: Optional[tuple] = None,
+    render_dem: bool = RENDER_DEM_BASEMAP
 ) -> str:
     """
     生成岸段风险分布图（图上只画插值后的岸段色带，不画断面线/断面点）
@@ -640,15 +653,18 @@ def generate_risk_distribution_map(
         figsize: 图表大小。**None（缺省）= 按河段地理范围动态计算并锁定等比例**
                  （推荐，见 compute_map_layout）；显式传入时尊重调用方，
                  但坐标轴仍会设置等比例 aspect——固定画布只会带来留白，不会变形。
-        dem_path: DEM 文件路径（可选，用于底图）
+        dem_path: DEM 文件路径。**当前缺省不画**（见 :data:`RENDER_DEM_BASEMAP`）：
+                   保留该参数只为兼容 Java 侧载荷，传了也不会加载 DEM。
+        render_dem: 是否把 DEM 灰度高程衬底画到图上。缺省 False = 不显示 DEM
+                   （2026-10-21 需求）。传 True 恢复旧行为，其余图层完全不受影响。
         banks: 岸段列表 [{bank_id, bank_name, coordinates:[[lng,lat],...]}]，
                提供时把岸段按断面风险等级做沿程颜色插值后绘制（图面主体）
         gap_meters: 「内插/外推」区段的间距阈值（米）。缺省 None = 按该岸段断面的实际
                     密度自适应（推荐）；显式传值则覆盖自适应。相邻断面跨距超过阈值、
                     或落在断面范围之外的区段，会用虚线+低透明度弱化显示。
         basemap: 遥感影像底图配置（可选，见 visualization.basemap.resolve_config）。
-                 在最底层（zorder=-10，低于 DEM）垫一层影像，**不改变** DEM / 岸段 /
-                 断面任何一层的绘制参数。缺 key / 网络不通 / 未配置时自动跳过。
+                 在最底层（zorder=-10）垫一层影像，**不改变**岸段色带等上层任何
+                 绘制参数。缺 key / 网络不通 / 未配置时自动跳过。
         bbox: 显示范围 (west, south, east, north)，分幅出图的子图窗口。
                 None（缺省）= 按断面+岸段几何包络自动计算并扩边 15%；
                 传入时坐标轴范围精确锁定为该 bbox，越界内容由 matplotlib 裁掉，
@@ -709,8 +725,8 @@ def generate_risk_distribution_map(
     ax.set_aspect(aspect, adjustable='box')
 
     # ---------------------------------------------------------------
-    # 最底层：遥感影像底图（zorder=-10，必须低于 DEM 的 0）
-    # 只做「加一层」：DEM / 岸段 / 断面的绘制参数一概不动。
+    # 最底层：遥感影像底图（zorder=-10）
+    # 只做「加一层」：岸段色带等上层绘制参数一概不动。
     # ---------------------------------------------------------------
     basemap_report = basemap_module.draw_basemap(
         ax, basemap, (lng_min, lat_min, lng_max, lat_max),
@@ -722,12 +738,12 @@ def generate_risk_distribution_map(
               f"lat=[{bm_extent[2]:.4f}, {bm_extent[3]:.4f}]", flush=True)
     else:
         print("[viz] 本次未绘制遥感影像底图（未配置 / 缺 key / 取图失败），"
-              "DEM、岸段、断面三层不受影响", flush=True)
+              "岸段色带等图层不受影响", flush=True)
 
-    # 绘制 DEM 底图
-    print(f"[viz] dem_path parameter: {dem_path}", flush=True)
-    print(f"[viz] risk data extent: lng=[{lng_min:.6f}, {lng_max:.6f}], lat=[{lat_min:.6f}, {lat_max:.6f}]", flush=True)
-    if dem_path and os.path.exists(dem_path):
+    # 绘制 DEM 底图（缺省关闭：RENDER_DEM_BASEMAP=False ⇒ 图上不出现 DEM）
+    if not render_dem:
+        print("[viz] DEM 底图已关闭（RENDER_DEM_BASEMAP=False），本图不含 DEM 高程底图", flush=True)
+    elif dem_path and os.path.exists(dem_path):
         print(f"[viz] loading DEM: {dem_path}", flush=True)
         dem_data, dem_coords = load_dem_basemap(dem_path, (lng_min, lng_max, lat_min, lat_max))
         if dem_data is not None:
@@ -772,7 +788,10 @@ def generate_risk_distribution_map(
     bank_report = {}
     drawn_banks = _draw_bank_gradients(ax, banks, sections, gap_meters, report=bank_report)
     sparse_segments = bank_report.get('sparse_segments', 0)
-    print(f"[viz] bank gradients drawn: {drawn_banks}", flush=True)
+    # 稀疏（内插/外推）区段仍按虚线绘制，只是不再进图例（2026-10-21 需求）；
+    # 这里把条数打进日志，便于排查「图上虚线怎么没了/怎么多了」。
+    print(f"[viz] bank gradients drawn: {drawn_banks}, "
+          f"sparse segments: {sparse_segments}", flush=True)
 
     # 断面不再单独绘制（需求：图上只显示插值后的岸段色带）。
     # 断面数据仍驱动岸段插值、稀疏判定与取景范围——只是不画断面线和端点。
@@ -789,16 +808,16 @@ def generate_risk_distribution_map(
     ax.set_title(title, fontsize=16 * font_scale, fontweight='bold', pad=15)
     
     # 添加图例（左上角）
-    # 只列图上真正会出现的三档（一级/二级/三级）。低风险与「无数据」按页面口径
-    # 整段不画，列进图例等于承诺一种图上不存在的颜色 —— 会被读成「这里有一档灰色」。
+    # 图例条目与文案由 config.RISK_LEGEND 唯一决定（见该常量注释：最高档不进图例、
+    # 「内插/外推区段」这一项已按需求移除）。低风险与「无数据」按页面口径整段不画，
+    # 列进图例等于承诺一种图上不存在的颜色。
+    #
+    # ⚠ 稀疏区段的虚线样式仍在图上绘制（_draw_bank_gradients），只是不再进图例；
+    #   不要因为这里没列就把 GAP_LINESTYLE 一起删掉。
     legend_patches = [
         mpatches.Patch(color=RISK_COLORS[level], label=label)
         for level, label in RISK_LEGEND
     ]
-    if drawn_banks and sparse_segments:
-        # 只有真的画出了虚线区段才列出这一项，否则图例里会出现一个图上并不存在的样式
-        legend_patches.append(Line2D([0], [0], color='#64748b', linewidth=1.5,
-                                     linestyle=GAP_LINESTYLE, label='内插/外推区段'))
     # 图例底板透明度 80%（alpha=0.8，保留 20% 透出底图），与 heatmap.py / section_chart.py
     # 的标注框（facecolor='white', alpha=0.8, edgecolor='gray'）保持同一套视觉约定；
     # 白底 80% 不透明足以压住底图纹理，保证图例文字（默认黑色）清晰可读。
