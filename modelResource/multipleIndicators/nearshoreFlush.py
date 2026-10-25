@@ -61,7 +61,7 @@ def compute_nearshore_flush(
             risk = [0, 1, 0, 0]
         elif Ln < risk_threshold[2]:
             risk = [0, 0, 1, 0]
-        elif Ln > risk_threshold[2]:
+        elif Ln >= risk_threshold[2]:
             risk = [0, 0, 0, 1]
         return Ln, risk
 

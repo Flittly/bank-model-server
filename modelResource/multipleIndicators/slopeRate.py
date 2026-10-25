@@ -26,7 +26,7 @@ def compute_slope_rate(section_view_output_path, risk_threshold):
             risk = [0,1,0,0]
         elif Sa < risk_threshold[2]:
             risk = [0,0,1,0]
-        elif Sa > risk_threshold[2]:
+        elif Sa >= risk_threshold[2]:
             risk = [0,0,0,1]
         return Sa, risk
     

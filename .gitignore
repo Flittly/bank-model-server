@@ -188,3 +188,6 @@ resource/
 
 # 可视化脚本运行时产物（跑 visualization/test_viz.py 等会生成 PNG/JSON 到该目录，不入库）
 visualization/output/
+
+# pytest 沙箱临时目录（默认 basetemp 的 rmtree 会被 bulk-delete 守卫拦，故指定到仓库内）
+.pytest_tmp/
