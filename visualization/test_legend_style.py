@@ -15,6 +15,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from visualization import risk_map
+from visualization.config import RISK_LEGEND
 
 # 与 test_tiles.py 同一套最小数据：一个闭合岸段环 + 一排断面
 def _sections(count=8, level=2):
@@ -95,14 +96,16 @@ def test_legend_text_is_dark_and_readable():
             assert max(r, g, b) < 0.5, \
                 f'图例文字 {t.get_text()!r} 颜色过浅（{t.get_color()}），会看不清'
         labels = [t.get_text() for t in texts]
-        # 2026-10-21 需求：最高档「一级风险」不再进图例；原「二级风险」改名「高风险」、
+        # 条目与文案以 config.RISK_LEGEND 为唯一真源，别在这里再抄一份：
+        # 2026-10-21 需求：最高档「一级风险」不进图例；原「二级风险」改名「高风险」、
         # 原「三级风险」改名「中风险」；「内插/外推区段」这一项也移除
         # （虚线样式仍照常画在图上，只是不再有图例说明）。
-        assert labels == ['高风险', '中风险'], labels
+        # 2026-10-26：低风险重新着色，图例补回「低风险」。
+        assert labels == [label for _, label in RISK_LEGEND], labels
         assert '一级风险' not in labels, '最高档按需求不进图例'
         assert '内插/外推区段' not in labels, '「内插/外推区段」图例项已移除'
-        assert '无数据' not in labels, '「无数据」已不再渲染，图例里不能再出现'
-        assert '低风险' not in labels, '低风险按页面口径不着色，图例里不能出现'
+        assert '无数据' not in labels, '「无数据」不是等级，图例里不能出现'
+        assert '低风险' in labels, '低风险已着色，图例必须列出对应的绿色'
     finally:
         plt.close('all')
         for name in os.listdir(workdir):

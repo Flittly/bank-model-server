@@ -25,6 +25,7 @@ import numpy as np
 import pytest
 
 from visualization import risk_map
+from visualization.config import RISK_LEGEND
 
 
 def _sections(count=8, level=2):
@@ -112,10 +113,11 @@ def test_dem_is_not_loaded_even_when_path_exists(no_basemap, monkeypatch, workdi
 
 
 def test_legend_has_no_dem_related_entries(no_basemap, workdir):
-    """顺带守住图例：最高档不进图例、内插/外推项已移除（见需求 1）。"""
+    """顺带守住图例：条目与 config.RISK_LEGEND 逐项一致，且不含 DEM 项。"""
     _, ax = _draw(workdir)
     labels = [t.get_text() for t in ax.get_legend().get_texts()]
-    assert labels == ['高风险', '中风险'], labels
+    assert labels == [label for _, label in RISK_LEGEND], labels
+    assert not any('DEM' in label or '高程' in label for label in labels)
 
 
 def test_render_dem_true_restores_old_behaviour(no_basemap, monkeypatch, workdir):

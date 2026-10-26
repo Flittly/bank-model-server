@@ -1,8 +1,8 @@
-"""岸段色带的配色与可见性契约（2026-10-21）。
+"""岸段色带的配色与可见性契约（2026-10-21 建立，2026-10-26 修订）。
 
-需求：出图配色与前端页面**完全一致**；色带只显示 ``risk_level`` 2/3/4 三档
-（页面上的一级/二级/三级风险）；低风险（``risk_level`` 1）与未计算（无风险值）
-**不渲染、不着色**。
+需求：出图配色与前端页面**完全一致**；色带画 ``risk_level`` 1..4 四档
+（绿 / 蓝 / 橙 / 红）。低风险自 2026-10-26 起改为正常着色，
+只有未计算（无风险值）**不着色**。
 
 三条契约分别由下面三组测试守着：
 
@@ -10,7 +10,7 @@
    （键按「前端显示等级 + 1」对应 ``risk_level``）。这是**跨仓库**契约：
    页面改了色而图没改，用户看到的就是「同一份结果两种颜色」。
 2. 逐段着色取的是断面等级的**原始色值**，不做插值 —— 插值会产生不属于任何等级的中间色。
-3. 不可渲染的等级（1 / 0 / None / 非法）不产生任何绘制段。
+3. 无风险值的等级（None / 0 / 非法）不产生任何绘制段；1..4 全部产生。
 
 几何口径：断面中点投影到岸段折线，按「最近断面」切段（与页面 buildRiskBandSpans 同）。
 """
@@ -94,22 +94,23 @@ def test_palette_equals_frontend_risk_colors():
 
 
 def test_rendered_levels_match_frontend_visibility():
-    """页面 only 画显示等级 1..3（= risk_level 2..4），出图着色必须是同一组。
+    """页面着色 0..3（= risk_level 1..4），出图必须是同一组。
 
     图例**不必**与着色档数一致：2026-10-21 起最高档（4，红）按需求不进图例，
-    另两档文案改为「高风险 / 中风险」。这里把着色口径与图例口径分开断言。
+    另两档文案改为「高风险 / 中风险」；2026-10-26 补回「低风险」，因为低风险
+    重新上色后图面出现了图例里没有的绿色。这里把着色口径与图例口径分开断言。
     """
-    assert RISK_RENDERED_LEVELS == (2, 3, 4)
-    assert [level for level, _ in RISK_LEGEND] == [3, 2]
-    assert [label for _, label in RISK_LEGEND] == ['高风险', '中风险']
+    assert RISK_RENDERED_LEVELS == (1, 2, 3, 4)
+    assert [level for level, _ in RISK_LEGEND] == [3, 2, 1]
+    assert [label for _, label in RISK_LEGEND] == ['高风险', '中风险', '低风险']
 
 
-@pytest.mark.parametrize('level', [2, 3, 4, 2.0, '3'])
+@pytest.mark.parametrize('level', [1, 2, 3, 4, 1.0, 2.0, '3'])
 def test_renderable_levels(level):
     assert is_rendered_level(level) is True
 
 
-@pytest.mark.parametrize('level', [None, 0, 1, -1, 5, 2.5, 'x', float('nan'), object()])
+@pytest.mark.parametrize('level', [None, 0, -1, 5, 2.5, 'x', float('nan'), object()])
 def test_non_renderable_levels(level):
     assert is_rendered_level(level) is False
 
@@ -145,18 +146,19 @@ def test_boundary_sits_at_midpoint_between_adjacent_levels():
 
 
 # ---------------------------------------------------------------------------
-# 3. 低风险 / 未计算不着色
+# 3. 低风险着色、无风险值不着色
 # ---------------------------------------------------------------------------
 
-def test_low_risk_span_is_not_drawn():
-    """4 级 + 1 级：只画 4 级那半边，1 级那半边不着色。"""
+def test_low_risk_span_is_drawn_green():
+    """4 级 + 1 级：两半都要画，1 级那半边是绿色（2026-10-26 起）。"""
     sections = [_section(1, 119.20, 4), _section(2, 119.30, 4),
                 _section(3, 119.50, 1), _section(4, 119.60, 1)]
     drawn, colors, segments = _draw(sections)
 
     assert drawn == 1
-    assert colors == [RISK_COLORS[4]], f'1 级不应着色，实际出现 {colors}'
-    assert segments < 40, '低风险段应留空（不是画成透明色），段数应明显少于整条岸段'
+    assert sorted(colors) == sorted([RISK_COLORS[4], RISK_COLORS[1]]), colors
+    assert RISK_COLORS[1] == '#10b981', '低风险必须是绿色'
+    assert segments >= 40, '整条岸段都应着色，不应再留空'
 
 
 def test_uncomputed_section_span_is_not_drawn():
@@ -169,13 +171,21 @@ def test_uncomputed_section_span_is_not_drawn():
     assert segments < 40, '中间那段没算出结果，必须留空'
 
 
-def test_bank_without_any_renderable_level_is_skipped():
-    """整条都是低风险 / 无值 → 连一条 collection 都不应生成。"""
-    for level in (1, None):
-        drawn, colors, segments = _draw([_section(1, 119.20, level),
-                                         _section(2, 119.60, level)])
-        assert drawn == 0, f'level={level} 不应绘制岸段'
-        assert colors == [] and segments == 0
+def test_bank_without_any_risk_value_is_skipped():
+    """整条都是无风险值 → 连一条 collection 都不应生成。低风险不再属于此类。"""
+    drawn, colors, segments = _draw([_section(1, 119.20, None),
+                                     _section(2, 119.60, None)])
+    assert drawn == 0
+    assert colors == [] and segments == 0
+
+
+def test_bank_with_only_low_risk_is_drawn():
+    """整条都是低风险 → 整条绿色，不再被判成「没有可渲染断面」。"""
+    drawn, colors, segments = _draw([_section(1, 119.20, 1),
+                                     _section(2, 119.60, 1)])
+    assert drawn == 1
+    assert colors == [RISK_COLORS[1]]
+    assert segments >= 40
 
 
 def test_bank_without_sections_is_skipped():

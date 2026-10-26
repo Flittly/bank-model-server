@@ -146,15 +146,16 @@ def _draw_bank_gradients(ax, banks, sections, gap_meters=None, report=None) -> i
     配色与可见性口径**与页面完全一致**（色值真源 `riskScoring.ts`，
     可见性口径 `sectionRenderVisibility.ts`）：
 
-    * 只画 ``risk_level`` 2/3/4（蓝 / 橙 / 红三档）；
-    * ``risk_level`` 1（低风险）与缺失/未知（未计算、计算失败）**不画**——
-      不是画成透明色，而是整段不生成 LineCollection，让底图自然透出；
+    * ``risk_level`` 1/2/3/4 四档**全部着色**（绿 / 蓝 / 橙 / 红）——
+      低风险自 2026-10-26 起改为正常画绿色，与页面同一口径；
+    * 只有缺失/未知（未计算、计算失败）**不画** —— 不是画成透明色，
+      而是整段不生成 LineCollection，让底图自然透出。「没数」不是第 5 个等级；
     * 每条断面管辖「与前后断面中点之间」的那段岸线，区间内**纯色**
-      （见 ``gradient.build_span_colors``）；因此可见段会形成断层，
-      「岸段看起来像断开」正是页面的表现。
+      （见 ``gradient.build_span_colors``）；因此换色是硬边，
+      与页面逐像素同款。
 
     返回成功绘制的岸段数。缺数据时逐项打印原因，不静默跳过——「图上没有岸段」
-    必须能在日志里看出是哪一环缺的（载荷没带 / 几何点太少 / 坐标非法 / 全是不可渲染等级）。
+    必须能在日志里看出是哪一环缺的（载荷没带 / 几何点太少 / 坐标非法 / 全是无风险值）。
 
     闭合环（``banks.bank_geometry`` 实测首末点重合）按**环**处理，不掰直：
     几何原样绘制、颜色按环分区、稀疏判定按环计算。理由见 gradient.is_closed_ring。
@@ -163,7 +164,8 @@ def _draw_bank_gradients(ax, banks, sections, gap_meters=None, report=None) -> i
                        None 表示按该岸段断面的实际密度自适应（推荐，见 adaptive_gap_threshold）。
     :param report: 可选 dict；会写入 ``sparse_segments``（实画的虚线区段数），
                    仅用于日志核对（2026-10-21 起图例不再列「内插/外推区段」一项）。
-                   另写入 ``hidden_sections``（因低风险/无风险值而未着色的断面数）。
+                   另写入 ``hidden_sections``（因**无风险值**而未着色的断面数；
+                   2026-10-26 起低风险不再计入这里）。
     """
     if not banks:
         print('[viz] 载荷未包含 banks（旧载荷或后端未取到岸段几何），跳过岸段色带', flush=True)
@@ -226,11 +228,12 @@ def _draw_bank_gradients(ax, banks, sections, gap_meters=None, report=None) -> i
                   flush=True)
             continue
 
-        # color is None = 该段归低风险断面或无风险值断面管辖 ⇒ 不画（不着色）
+        # color is None = 该段归「无风险值」断面管辖 ⇒ 不画（不着色）。
+        # 2026-10-26 起低风险（risk_level 1）也会给出绿色，不再落进这个分支。
         visible = [(seg, color, gap) for seg, color, gap in zip(segments, colors, gaps)
                    if color is not None]
         if not visible:
-            print(f'[viz] 岸段 {bank_id} 全部断面为低风险或无风险值（{len(items)} 条），'
+            print(f'[viz] 岸段 {bank_id} 全部断面无风险值（{len(items)} 条），'
                   f'整条不渲染', flush=True)
             continue
 
@@ -250,7 +253,7 @@ def _draw_bank_gradients(ax, banks, sections, gap_meters=None, report=None) -> i
         drawn += 1
 
     if hidden_total:
-        print(f'[viz] {hidden_total} 条断面为低风险或无风险值，按页面口径不着色', flush=True)
+        print(f'[viz] {hidden_total} 条断面无风险值，按页面口径不着色', flush=True)
     if report is not None:
         report['sparse_segments'] = sparse_total
         report['hidden_sections'] = hidden_total
@@ -809,8 +812,9 @@ def generate_risk_distribution_map(
     
     # 添加图例（左上角）
     # 图例条目与文案由 config.RISK_LEGEND 唯一决定（见该常量注释：最高档不进图例、
-    # 「内插/外推区段」这一项已按需求移除）。低风险与「无数据」按页面口径整段不画，
-    # 列进图例等于承诺一种图上不存在的颜色。
+    # 「内插/外推区段」这一项已按需求移除）。低风险自 2026-10-26 起在图上着绿色，
+    # 图例必须列出来 —— 图上出现图例里没有的颜色等于没法查证。
+    # 「无风险值」仍按页面口径整段不画，所以不进图例：列进去等于承诺一种图上不存在的颜色。
     #
     # ⚠ 稀疏区段的虚线样式仍在图上绘制（_draw_bank_gradients），只是不再进图例；
     #   不要因为这里没列就把 GAP_LINESTYLE 一起删掉。
