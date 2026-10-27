@@ -279,3 +279,57 @@ def test_description_counts_only_rendered_sections(tmp_path):
 
     assert '共 2 个断面' in description, description
     assert '另有 1 个未着色' in description and '人工无效 1 个' in description, description
+
+
+def test_partition_spans_puts_blank_neighbours_on_butt_cap():
+    """紧邻空白段的边单独归组，线帽改 butt —— 圆头会把邻段颜色伸进无效段。
+
+    几何：5 条边，第 1~3 边是空白段（``colors`` 为 None），第 0 边和第 4 边可画。
+    可画的这两条各有一端顶着空白段，必须进 butt 组；若落进 round 组，6 pt 线宽
+    在 150 dpi 下会有 6.2 px 半圆头越过边界，短空白段直接被填满。
+    """
+    segments = [[(0, 0), (1, 0)], [(1, 0), (2, 0)], [(2, 0), (3, 0)],
+                [(3, 0), (4, 0)], [(4, 0), (5, 0)]]
+    colors = ['#ff0000', None, None, None, '#00ff00']
+    gaps = [False] * 5
+
+    buckets = risk_map._partition_spans(segments, colors, gaps)
+    assert len(buckets[(False, 'butt')]) == 2, '顶着空白段的两条边没有改成 butt'
+    assert buckets[(False, 'round')] == [], '不该有整段都不挨着空白的边被误判成 round'
+    assert buckets[(True, 'butt')] == [] and buckets[(True, 'round')] == []
+
+
+def test_partition_spans_keeps_round_inside_contiguous_run():
+    """连续同色段内部仍用 round：改 butt 会在弯折外侧留楔形缺口。"""
+    segments = [[(i, 0), (i + 1, 0)] for i in range(4)]
+    colors = ['#ff0000', '#ff0000', None, '#00ff00']
+    gaps = [False, False, False, True]
+
+    buckets = risk_map._partition_spans(segments, colors, gaps)
+    assert len(buckets[(False, 'round')]) == 1, '第 1 边两侧都是彩色，应为 round'
+    assert len(buckets[(False, 'butt')]) == 1, '第 0 边右侧是空白，应为 butt'
+    assert len(buckets[(True, 'butt')]) == 1, '第 3 边左侧是空白且为稀疏段，应为稀疏 butt'
+
+
+def test_blank_boundary_edges_are_drawn_with_butt_cap():
+    """真实绘制：无效断面两侧收口必须是 butt，内部仍是 round。"""
+    invalid = {**_section(2, 119.40, None), 'manual_invalid': True}
+    sections = [_section(1, 119.20, 3), invalid,
+                _section(3, 119.60, 3), _section(4, 119.70, 1)]
+
+    fig, ax = plt.subplots()
+    try:
+        risk_map._draw_bank_gradients(ax, _bank(), sections)
+        butt = round_ = 0
+        for collection in ax.collections:
+            cap = collection.get_capstyle()
+            count = len(collection.get_segments())
+            if cap == 'butt':
+                butt += count
+            elif cap == 'round':
+                round_ += count
+    finally:
+        plt.close(fig)
+
+    assert butt == 2, f'无效段两端应各有一条 butt 收口，实际 butt 边数 {butt}'
+    assert round_ > 0, '其余边应保持 round 线帽，否则弯折处会留缺口'

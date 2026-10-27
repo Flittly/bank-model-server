@@ -140,6 +140,33 @@ def _safe_level(section):
         return None
 
 
+def _partition_spans(segments, colors, gaps) -> dict:
+    """把待画的边按「是否紧邻空白段」分成四组：``(是否稀疏, 线帽)`` → ``[(线段, 颜色)]``。
+
+    ``LineCollection`` 的 ``capstyle`` 是按整个集合生效的，没法逐段指定。而
+    ``round`` 会把半圆头**伸出段端点** ``linewidth/2``：6 pt @150 dpi ≈ 6.2 px，
+    在本项目默认比例尺（约 114 m/px）下接近 700 m。空白段（``colors[i] is None``，
+    即无效/未计算断面管辖的那段）若两端都用圆头收口，等于把邻段颜色硬灌进来：
+    实测 16601 m 的空白只剩约 133 px 净可见（两端各被吃掉 6.2 px），更短的空白
+    会被两端圆头直接填满——这正是「无效断面又被旁边颜色染上」的物理来源。
+
+    所以紧邻空白段的边改用 ``butt``：端点即边界，一像素不外溢。两侧都是彩色段
+    的边仍用 ``round``——弯折处靠圆头补缝，全改 butt 会在外侧留楔形缺口。
+
+    :return: dict，键为 ``(gap, cap)``，值为该组的 ``[(segment, color), ...]``。
+    """
+    buckets = {(False, 'round'): [], (False, 'butt'): [],
+               (True, 'round'): [], (True, 'butt'): []}
+    total = len(segments)
+    for i, (seg, color, gap) in enumerate(zip(segments, colors, gaps)):
+        if color is None:
+            continue
+        touches_blank = ((i > 0 and colors[i - 1] is None)
+                         or (i + 1 < total and colors[i + 1] is None))
+        buckets[(bool(gap), 'butt' if touches_blank else 'round')].append((seg, color))
+    return buckets
+
+
 def _draw_bank_gradients(ax, banks, sections, gap_meters=None, report=None) -> int:
     """把岸段折线按断面风险等级着色，画在断面之下（zorder=2）。
 
@@ -152,7 +179,8 @@ def _draw_bank_gradients(ax, banks, sections, gap_meters=None, report=None) -> i
       而是整段不生成 LineCollection，让底图自然透出。「没数」不是第 5 个等级；
     * 每条断面管辖「与前后断面中点之间」的那段岸线，区间内**纯色**
       （见 ``gradient.build_span_colors``）；因此换色是硬边，
-      与页面逐像素同款。
+      与页面逐像素同款。空白段**两端用 butt 收口**，不让邻段的圆头
+      （≈6 px ≈ 700 m）探进无效断面自己那一段，见 ``_partition_spans``。
 
     返回成功绘制的岸段数。缺数据时逐项打印原因，不静默跳过——「图上没有岸段」
     必须能在日志里看出是哪一环缺的（载荷没带 / 几何点太少 / 坐标非法 / 全是无风险值）。
@@ -241,19 +269,19 @@ def _draw_bank_gradients(ax, banks, sections, gap_meters=None, report=None) -> i
                   f'整条不渲染', flush=True)
             continue
 
-        solid = [(seg, color) for seg, color, gap in visible if not gap]
-        sparse = [(seg, color) for seg, color, gap in visible if gap]
-
-        if solid:
-            ax.add_collection(LineCollection(
-                [seg for seg, _ in solid], colors=[c for _, c in solid],
-                linewidths=BANK_LINEWIDTH, alpha=0.75, zorder=2, capstyle='round'))
-        if sparse:
-            ax.add_collection(LineCollection(
-                [seg for seg, _ in sparse], colors=[c for _, c in sparse],
-                linewidths=BANK_GAP_LINEWIDTH, alpha=0.4,
-                linestyles=GAP_LINESTYLE, zorder=2, capstyle='round'))
-            sparse_total += len(sparse)
+        for (gap, cap), entries in _partition_spans(segments, colors, gaps).items():
+            if not entries:
+                continue
+            if gap:
+                ax.add_collection(LineCollection(
+                    [seg for seg, _ in entries], colors=[c for _, c in entries],
+                    linewidths=BANK_GAP_LINEWIDTH, alpha=0.4,
+                    linestyles=GAP_LINESTYLE, zorder=2, capstyle=cap))
+                sparse_total += len(entries)
+            else:
+                ax.add_collection(LineCollection(
+                    [seg for seg, _ in entries], colors=[c for _, c in entries],
+                    linewidths=BANK_LINEWIDTH, alpha=0.75, zorder=2, capstyle=cap))
         drawn += 1
 
     if hidden_total:
