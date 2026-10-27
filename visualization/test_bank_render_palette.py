@@ -17,6 +17,8 @@
 import re
 from pathlib import Path
 
+import json
+
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -72,6 +74,26 @@ def _draw(sections):
     finally:
         plt.close(fig)
     return drawn, colors, segments
+
+
+def _draw_report(sections):
+    """只取绘制报告（稀疏区段数 / 未着色断面数）。"""
+    fig, ax = plt.subplots()
+    report = {}
+    try:
+        risk_map._draw_bank_gradients(ax, _bank(), sections, report=report)
+    finally:
+        plt.close(fig)
+    return report
+
+
+def _span_colors(sections):
+    """直接拿 ``build_span_colors`` 的逐段结果（含 None = 不画）。"""
+    coords = _bank()[0]['coordinates']
+    _, items, total, xy = gradient.build_stops(sections, coords)
+    _, arc, _ = gradient.cumulative_lengths(xy)
+    colors, _ = gradient.build_span_colors(xy, arc, total, items)
+    return colors
 
 
 # ---------------------------------------------------------------------------
@@ -193,3 +215,67 @@ def test_bank_without_sections_is_skipped():
     drawn, colors, segments = _draw([])
     assert drawn == 0
     assert colors == [] and segments == 0
+
+
+# ---------------------------------------------------------------------------
+# 4. 人工无效断面：占住自己那段但不着色（2026-10-27）
+# ---------------------------------------------------------------------------
+
+def test_invalid_section_keeps_its_own_span_blank():
+    """人工标记无效的断面必须**整段留空**，不能被左右两个有效断面把颜色铺过来。
+
+    病灶（2026-10-27 用户反馈「无效断面最后还是会被渲染上颜色」）：后端最初在 SQL 里
+    直接 ``AND manual_invalid = false`` 把无效断面过滤掉。色带是按「最近断面」切段的，
+    断面一旦缺席，它原本管辖的那一段就改由左右邻居就近接管 —— 图上被标为无效的那段
+    照样有色，只是颜色换成了邻居的。正确做法是保留行、把等级置空，让这段归它自己管。
+
+    本测试同时断言「对照组」：只喂两侧有效断面时整条都会被铺满 —— 说明留空**不是**
+    因为几何上恰好没东西可画，而是真的靠无效断面占位。
+    """
+    invalid = {**_section(2, 119.40, None), 'manual_invalid': True}
+    sections = [_section(1, 119.20, 3), invalid, _section(3, 119.60, 3)]
+
+    colors = _span_colors(sections)
+    blank = sum(1 for c in colors if c is None)
+    assert blank > 0, '无效断面没有让任何一段留空'
+    # 无效断面在正中，辖区 = 前后两条断面的中点之间 = 全长的一半
+    ratio = blank / len(colors)
+    assert 0.4 < ratio < 0.6, f'留空比例应约 1/2，实际 {ratio:.2%}（{blank}/{len(colors)}）'
+
+    # 对照组：把无效断面拿掉 = 旧后端口径，整条被邻居的颜色填满
+    fallback = _span_colors([sections[0], sections[2]])
+    assert all(c is not None for c in fallback), (
+        '对照组不该留空：断面缺席时邻居会接管它那段，这正是被过滤掉之后的后果')
+
+
+def test_invalid_sections_do_not_shrink_gap_threshold():
+    """人工无效断面不参与「间距」统计，否则同岸段别处正常段会被误判成虚线。
+
+    间距阈值的语义是「两个**实测控制点**之间的跨距」：无效/未计算的断面在图上没有
+    颜色，不构成控制点。若把它们算进去，中位间距被压小 → 阈值变小 → 这一条岸段上
+    另一处本来正常的实线段被画成半透明虚线，用户会以为「标了几条无效，别处也坏了」。
+    """
+    base = [_section(1, 119.20, 3), _section(2, 119.30, 3),
+            _section(3, 119.50, 3), _section(4, 119.60, 3)]
+    # 在 119.20~119.30 之间插 5 条人工无效断面（间距 ~1.5 km，远密于 9.4 km 的正常间距）
+    filler = [{**_section(10 + i, 119.20 + 0.016 * (i + 1), None), 'manual_invalid': True}
+              for i in range(5)]
+
+    assert _draw_report(base)['sparse_segments'] == 0, '对照组：正常间距下不应出现虚线区段'
+    report = _draw_report(base + filler)
+    assert report['sparse_segments'] == 0, (
+        '人工无效断面被算进了间距统计，把阈值压小，119.30~119.50 那段正常实线变成虚线')
+    assert report['hidden_sections'] == len(filler)
+
+
+def test_description_counts_only_rendered_sections(tmp_path):
+    """图注的断面数按**可着色**统计，并与报告正文（排除无效）对得上。"""
+    sections = [_section(1, 119.20, 3),
+                {**_section(2, 119.40, None), 'manual_invalid': True},
+                _section(3, 119.60, 3)]
+    raw = risk_map.generate_risk_distribution_map(
+        sections, output_dir=str(tmp_path), output_name='desc.png', banks=_bank())
+    description = json.loads(raw)['description']
+
+    assert '共 2 个断面' in description, description
+    assert '另有 1 个未着色' in description and '人工无效 1 个' in description, description

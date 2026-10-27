@@ -507,7 +507,17 @@ def build_span_colors(xy, s, total: float, items,
 
     ordered = sorted(items, key=lambda item: item['along'])
     alongs = [item['along'] for item in ordered]
-    measured = np.asarray(sorted(alongs), dtype=float)
+    # ⚠ 两个数组刻意不同：
+    #   * ``alongs``（全部断面）决定**区间归属** —— 无效/未计算的断面在图上不着色，
+    #     但它仍然「占着」自己那一段，必须把相邻有效断面挡在外面，否则那一段会被
+    #     邻居的颜色铺满（这正是「标了无效却还是有色」的根因）。
+    #   * ``measured``（仅可着色断面）只用于**间距判定** —— 没有颜色的断面不是实测
+    #     控制点，把它算进间距会把该岸段的中位间距压小、阈值随之变小，于是同一条
+    #     岸段上**别处**本来正常的实线段被误判成「内插」画成虚线。标几条无效断面
+    #     不该改变其它区段的线型。
+    measured = np.asarray(sorted(
+        item['along'] for item in ordered
+        if is_rendered_level(item.get('risk_level'))), dtype=float)
 
     colors: list[str | None] = []
     gaps: list[bool] = []

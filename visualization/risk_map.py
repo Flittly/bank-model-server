@@ -213,9 +213,13 @@ def _draw_bank_gradients(ax, banks, sections, gap_meters=None, report=None) -> i
         hidden = sum(1 for item in items if not is_rendered_level(item.get('risk_level')))
         hidden_total += hidden
 
+        # 自适应间距阈值只按**可着色**断面统计：无效/未计算的断面在图上没有颜色，
+        # 不构成实测控制点，把它们算进去会压低中位间距→阈值变小→同岸段别处正常段
+        # 被误判成「内插」画成虚线（与 gradient.build_span_colors 内的 measured 同口径）。
         threshold = gradient.adaptive_gap_threshold(
-            [item['along'] for item in items], override=gap_meters,
-            cyclic=is_ring, total=total)
+            [item['along'] for item in items
+             if is_rendered_level(item.get('risk_level'))],
+            override=gap_meters, cyclic=is_ring, total=total)
         _, arc, _ = gradient.cumulative_lengths(xy)
         colors, gaps = gradient.build_span_colors(
             xy, arc, total, items, threshold, cyclic=is_ring)
@@ -846,6 +850,18 @@ def generate_risk_distribution_map(
         risk_counts[level] = risk_counts.get(level, 0) + 1
     high_risk_count = sum(count for level, count in risk_counts.items()
                           if level is not None and level >= 2)
+
+    # 描述里的断面数按**可着色**统计：人工标为无效的断面（risk_level 被 Java 侧置空）
+    # 在图上不着色、在报告正文里也已排除（RiskSegmentSummaryService 同口径），
+    # 这里若照旧写 len(sections) 会与正文数字对不上，看起来像漏算。
+    rendered_count = sum(1 for s in sections if is_rendered_level(_safe_level(s)))
+    hidden_count = len(sections) - rendered_count
+    invalid_count = sum(1 for s in sections if s.get('manual_invalid'))
+    hidden_note = ''
+    if hidden_count:
+        hidden_note = f"，另有 {hidden_count} 个未着色"
+        if invalid_count:
+            hidden_note += f"（其中人工无效 {invalid_count} 个）"
     
     # 添加比例尺（左下角）
     add_scale_bar(ax, lng_min, lng_max, lat_min, lat_max, font_scale=font_scale)
@@ -872,7 +888,8 @@ def generate_risk_distribution_map(
     basemap_note = "，含遥感影像底图" if basemap_report.get('drawn') else ""
     return save_result(
         output_dir, 'risk_distribution', file_path,
-        title, f"共 {len(sections)} 个断面{bank_note}，高风险(>=2) {high_risk_count} 个{basemap_note}"
+        title, f"共 {rendered_count} 个断面{bank_note}，高风险(>=2) {high_risk_count} 个"
+               f"{hidden_note}{basemap_note}"
     )
 
 
