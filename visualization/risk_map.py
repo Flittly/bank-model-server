@@ -602,8 +602,13 @@ def generate_risk_map_tiles(risk_data: List[dict],
     for tile in grid:
         r, c = tile['row'], tile['col']
         w, s, e, n = tile['bbox']
+        # 只数**可着色**断面：人工标为无效的断面在 Java 侧已被 risk_level 置空，
+        # 报告正文/分区表（Step 1 文本、RiskSegmentSummaryService）也早已排除它们。
+        # 若这里仍按几何全量计数，报告分区表会出现一个比正文更大的数字 ——
+        # 「同一份成果两套断面数」是本项目反复踩过的坑，两个口径必须同源。
         inside = sum(1 for sec in sections
-                     if w <= sec['start_lng'] <= e and s <= sec['start_lat'] <= n)
+                     if w <= sec['start_lng'] <= e and s <= sec['start_lat'] <= n
+                     and is_rendered_level(sec.get('risk_level')))
         print(f"[viz] 分幅 ({r},{c}) lng=[{w:.4f},{e:.4f}] lat=[{s:.4f},{n:.4f}]"
               f" 范围内断面 {inside} 条", flush=True)
         single = json.loads(generate_risk_distribution_map(

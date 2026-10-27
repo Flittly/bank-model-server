@@ -155,7 +155,7 @@ def test_resolve_tiles_rejects_inverted_range():
 # 3. 行为级：子图必须是完整地图
 # ---------------------------------------------------------------------------
 
-def _draw_split_capture(workdir, rows, cols, custom=None, with_banks=True):
+def _draw_split_capture(workdir, rows, cols, custom=None, with_banks=True, sections=None):
     """跑一次分幅出图，捕获每幅的坐标轴对象。"""
     axes = []
     original = plt.subplots
@@ -169,7 +169,8 @@ def _draw_split_capture(workdir, rows, cols, custom=None, with_banks=True):
     plt.subplots = fake_subplots
     try:
         result = risk_map.generate_risk_map_tiles(
-            _sections(), '分幅回归', output_dir=workdir, output_name='tiles.png',
+            _sections() if sections is None else sections,
+            '分幅回归', output_dir=workdir, output_name='tiles.png',
             rows=rows, cols=cols, tiles=custom, banks=banks)
     finally:
         plt.subplots = original
@@ -361,6 +362,26 @@ def test_split_counts_sections_per_tile():
         counts = [t['sections_in_tile'] for t in result['tiles']]
         assert counts == [4, 4], counts       # 8 条断面均分两幅
         assert all(t['bbox'][2] > t['bbox'][0] for t in result['tiles'])
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_split_counts_only_rendered_sections():
+    """人工无效（risk_level 置空）的断面不计入 ``sections_in_tile``。
+
+    这个计数会被报告分区表直接用（Java 侧 ``PartitionBounds`` 声明「口径完全一致」），
+    而报告正文/分区表的数据源（Step 1 文本、``RiskSegmentSummaryService``）早已排除
+    人工无效断面。若这里仍按几何全量计数，分区表会比正文多出一截，看起来像漏算。
+    """
+    workdir = tempfile.mkdtemp(prefix='tilesinvalid-')
+    try:
+        sections = _sections()
+        # 前 2 条打成人工无效：Java 侧表现为 risk_level=NULL + manual_invalid=true
+        mixed = ([dict(s, risk_level=None, manual_invalid=True) for s in sections[:2]]
+                 + [dict(s) for s in sections[2:]])
+        result, _ = _draw_split_capture(workdir, 1, 2, sections=mixed)
+        counts = [t['sections_in_tile'] for t in result['tiles']]
+        assert counts == [2, 4], f'左幅 4 条里有 2 条无效，应只数 2：{counts}'
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
