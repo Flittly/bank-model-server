@@ -165,7 +165,13 @@ APP_ALLOWED_EXTENSIONS = {"zip"}
 APP_IGNORE_THINGS = [".DS_Store", "__MACOSX"]
 
 CAL_CORE_NUM = 5
-MAX_RUNNING_MODEL_CASE_NUM = 20
+# 同时运行的模型 case 子进程上限。必须与 Java 侧 app.section.parallelism 配对：
+#   需要的槽位 ≈ parallelism × 每断面稳态 case 数（约 7；首个断面 10）
+#   4 × 7 = 28  ⇒  32（留约 14% 余量给单断面重算与报告出图抢槽）
+# 超限不会丢任务（modelProcess 会标成 waiting_slot 放进 deferred 队列），
+# 但那个队列是忙轮询的，堆太多会空转吃满一个核 —— 所以宁可提前把数算准。
+# 改这里不需要改 Java；但改 Java 的 parallelism 时务必回来同步这一项。
+MAX_RUNNING_MODEL_CASE_NUM = int(os.getenv("MAX_RUNNING_MODEL_CASE_NUM", "32"))
 MODEL_SERVICE_POLL_INTERVAL = 1
 MODEL_SERVICE_DEFAULT_TIMEOUT = 600
 
