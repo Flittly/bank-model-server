@@ -191,3 +191,6 @@ visualization/output/
 
 # pytest 沙箱临时目录（默认 basetemp 的 rmtree 会被 bulk-delete 守卫拦，故指定到仓库内）
 .pytest_tmp/
+
+# 本地改造基线与验收沙箱（含旧产物 tif/png、对比用 venv，单个目录可达数百 MB，不入库）
+backups/
