@@ -103,17 +103,118 @@ class DemCoverageError(RuntimeError):
         self.detail = detail or {}
 
 
-def _load_dem_and_valid_mask(dataset):
-    """Read band 1 once and return ``(dem, valid)``.
+########################################################################
+# DEM 窗口
+#
+# 一条断面只覆盖 DEM 极小的一片：实测 16x20 像元 = 1.2 KB，占全图的 0.001%。
+# 而全图读取要把 ~533 个 256x256 分块全部 DEFLATE 解压成 133 MB，再逐元素
+# 算两遍 nodata 掩膜，实测约 150 ms/断面（8 并发互相抢盘时劣化到 258 ms）。
+# 窗口化之后只碰 1 块，0.9 ms（8 并发 1.3 ms）。
+#
+# 窗口是"先扩后夹"得到的：取 100 个采样点的**整数包络**，向外扩
+# ``DEM_WINDOW_PAD`` 格，再夹回栅格范围。夹回来的代价不是"读到空值"，而是
+# 窗口不再是请求的那个矩形——所以原点偏移必须跟着数组一起走：对外一律保留
+# 全图行列号，只有真正取数组元素的那一刻才减去 ``(yoff, xoff)``。
+########################################################################
 
-    ``valid`` is a boolean array where ``False`` flags nodata / non-finite
-    cells. The nodata value is taken from the band metadata first; when a raster
-    declares none, its mask band is consulted so masked rasters are handled too.
+DEM_WINDOW_PAD = 2
+
+
+class DemWindow:
+    """DEM 的一块子栅格，外加把它映回全图的原点偏移。
+
+    ``data`` / ``valid`` 是窗口内的数组，``xoff`` / ``yoff`` 是窗口左上角在
+    全图中的列号 / 行号。
+
+    关键约定：``contains`` / ``value`` / ``is_valid`` 收的都是**全图坐标**。
+    调用方拿 ``prj2imagexy`` 算出来的整数直接传进来即可，
+    ``get_interpolated_pixel_index``、``_longest_valid_run`` 以及所有下游索引
+    都不需要知道窗口的存在。
     """
+
+    __slots__ = ("data", "valid", "xoff", "yoff")
+
+    def __init__(self, data, valid, xoff, yoff):
+        self.data = data
+        self.valid = valid
+        self.xoff = int(xoff)
+        self.yoff = int(yoff)
+
+    @property
+    def shape(self):
+        return self.data.shape
+
+    def contains(self, row, col):
+        """这个**全图**坐标是否落在窗口内。"""
+        rows, cols = self.data.shape
+        return (
+            self.yoff <= row < self.yoff + rows
+            and self.xoff <= col < self.xoff + cols
+        )
+
+    def value(self, row, col):
+        """取一格高程；窗口外返回 NaN（与旧的全图读取行为一致）。"""
+        if self.contains(row, col):
+            return self.data[row - self.yoff][col - self.xoff]
+        return np.float32(np.nan)
+
+    def is_valid(self, row, col):
+        """这一格是否既在窗口内、又不是 nodata。"""
+        if not self.contains(row, col):
+            return False
+        if self.valid is None:
+            return True
+        return bool(self.valid[row - self.yoff][col - self.xoff])
+
+
+def _as_window(dem_data, valid_pixels=None):
+    """把"整幅数组"包装成偏移为 0 的窗口，兼容旧的直接传 ndarray 调用。"""
+    if isinstance(dem_data, DemWindow):
+        return dem_data
+    return DemWindow(np.asarray(dem_data), valid_pixels, 0, 0)
+
+
+def _dem_window_box(image_coors, width, height, pad=DEM_WINDOW_PAD):
+    """100 个采样点的整数包络，外扩 ``pad`` 格后夹回栅格。
+
+    返回 ``(row0, row1, col0, col1)``，右/下为开区间，与 ``ReadAsArray`` 的
+    ``(xoff, yoff, xsize, ysize)`` 之间差一次行列换位（注意别写反）。
+    窗口与栅格完全不相交时返回全 0，调用方拿到的是空窗口——那样每个点都会被
+    判成无效，由 ``DEM_COVERAGE_INSUFFICIENT`` 统一报错。
+    """
+    if not image_coors:
+        return 0, 0, 0, 0
+    rows = [int(coor[0]) for coor in image_coors]
+    cols = [int(coor[1]) for coor in image_coors]
+    row0 = max(0, min(rows) - pad)
+    row1 = min(height, max(rows) + pad + 1)
+    col0 = max(0, min(cols) - pad)
+    col1 = min(width, max(cols) + pad + 1)
+    if row0 >= row1 or col0 >= col1:
+        return 0, 0, 0, 0
+    return row0, row1, col0, col1
+
+
+def _load_dem_window(dataset, box):
+    """只解压包络覆盖到的那几块，返回 ``DemWindow``。
+
+    ``valid`` 为 ``False`` 的格子是 nodata / 非有限值：先看波段声明的 nodata，
+    没声明再退回 mask band，与原全图实现逐条对应。
+    """
+    row0, row1, col0, col1 = box
+    height = row1 - row0
+    width = col1 - col0
+    if height <= 0 or width <= 0:
+        empty = np.zeros((0, 0), dtype=np.float32)
+        return DemWindow(empty, np.zeros((0, 0), dtype=bool), 0, 0)
+
     band = dataset.GetRasterBand(1)
-    width = dataset.RasterXSize
-    height = dataset.RasterYSize
-    dem = band.ReadAsArray(0, 0, width, height).astype(np.float32)
+    # 不要给 ``ReadAsArray`` 传 ``buf_size``：那会走金字塔降采样，返回的就不再
+    # 是原始像元，高程会整体漂移。``copy=False`` 同样重要——波段本身就是
+    # Float32，默认的 ``copy=True`` 会白白复制一份再丢掉。
+    dem = band.ReadAsArray(col0, row0, width, height).astype(
+        np.float32, copy=False
+    )
 
     nodata = band.GetNoDataValue()
     has_nodata = nodata is not None and not (
@@ -125,7 +226,7 @@ def _load_dem_and_valid_mask(dataset):
         valid = np.ones(dem.shape, dtype=bool)
         try:
             if band.GetMaskFlags() != gdal.GMF_ALL_VALID:
-                mask = band.GetMaskBand().ReadAsArray(0, 0, width, height)
+                mask = band.GetMaskBand().ReadAsArray(col0, row0, width, height)
                 if mask is not None:
                     valid = np.asarray(mask) > 0
         except Exception:  # pragma: no cover - mask support varies by driver
@@ -133,10 +234,30 @@ def _load_dem_and_valid_mask(dataset):
 
     # Non-finite values are never usable regardless of what the metadata says.
     valid &= np.isfinite(dem)
-    return dem, valid
+    return DemWindow(dem, valid, col0, row0)
 
 
-def _pixel_quad_validity(interpolated_coors, valid_pixels):
+def _window_covers(window, interpolated_coors, width, height):
+    """窗口是否覆盖了所有"本来就在栅格内"的取样角点。
+
+    落在栅格外的角点不算漏——那本来就该判无效。返回 ``False`` 说明窗口算小了，
+    调用方应当按这批点重开一个窗口，而不是让它们静默变成 NaN。
+    """
+    for coor in interpolated_coors:
+        for x, y in (
+            (coor[0], coor[1]),
+            (coor[2], coor[3]),
+            (coor[4], coor[5]),
+            (coor[6], coor[7]),
+        ):
+            if window.contains(y, x):
+                continue
+            if 0 <= y < height and 0 <= x < width:
+                return False
+    return True
+
+
+def _pixel_quad_validity(interpolated_coors, window):
     """A sample point is usable only when *all four* bilinear corners are valid.
 
     ``bilinear_interpolation`` blends the 4 corner values, so one nodata corner
@@ -146,19 +267,20 @@ def _pixel_quad_validity(interpolated_coors, valid_pixels):
     Coordinates outside the raster count as invalid: ``prj2imagexy`` only clamps
     the +/-1 neighbours, so a sample point beyond the DEM footprint would index
     past the array instead of raising a data error.
+
+    ``window`` is a ``DemWindow``; ``DemWindow.contains`` is asked with *full
+    image* coordinates, so "outside the window" and "outside the raster" stay
+    distinct — the window is clipped to the raster, which makes them agree for
+    every point of a section that lies inside the raster at all.
     """
-    rows, cols = valid_pixels.shape
-
-    def valid_at(row, col):
-        return 0 <= row < rows and 0 <= col < cols and bool(valid_pixels[row][col])
-
+    window = _as_window(window)
     flags = []
     for coor in interpolated_coors:
         flags.append(
-            valid_at(coor[1], coor[0])
-            and valid_at(coor[3], coor[2])
-            and valid_at(coor[5], coor[4])
-            and valid_at(coor[7], coor[6])
+            window.is_valid(coor[1], coor[0])
+            and window.is_valid(coor[3], coor[2])
+            and window.is_valid(coor[5], coor[4])
+            and window.is_valid(coor[7], coor[6])
         )
     return flags
 
@@ -326,7 +448,13 @@ def _safe_dem_value(dem_data, row, col):
 
     Sections can sit beyond the DEM footprint (the guard marks those samples as
     invalid); returning NaN here keeps the sampler from raising IndexError.
+
+    ``row`` / ``col`` are always **full image** coordinates — the window offset
+    is applied inside ``DemWindow.value``.
     """
+    if isinstance(dem_data, DemWindow):
+        return dem_data.value(row, col)
+    # 兼容直接传整幅 ndarray 的老调用（无偏移）。
     if 0 <= row < dem_data.shape[0] and 0 <= col < dem_data.shape[1]:
         return dem_data[row][col]
     return np.float32(np.nan)
@@ -335,17 +463,16 @@ def _safe_dem_value(dem_data, row, col):
 # get the elevation of the 4 pixel coors
 def get_elevation(interpolated_coors, dataset, dem_data=None):
     if dem_data is None:
-        band = dataset.GetRasterBand(1)
-        dem_data = band.ReadAsArray(
-            0, 0, dataset.RasterXSize, dataset.RasterYSize
-        ).astype(np.float32)
-    dem_data = np.array(dem_data)
+        dem_data = _load_dem_window(
+            dataset, (0, dataset.RasterYSize, 0, dataset.RasterXSize)
+        )
+    window = _as_window(dem_data)
     Z = []
     for interpolated_coor in interpolated_coors:
-        z1 = _safe_dem_value(dem_data, interpolated_coor[1], interpolated_coor[0])
-        z2 = _safe_dem_value(dem_data, interpolated_coor[3], interpolated_coor[2])
-        z3 = _safe_dem_value(dem_data, interpolated_coor[5], interpolated_coor[4])
-        z4 = _safe_dem_value(dem_data, interpolated_coor[7], interpolated_coor[6])
+        z1 = _safe_dem_value(window, interpolated_coor[1], interpolated_coor[0])
+        z2 = _safe_dem_value(window, interpolated_coor[3], interpolated_coor[2])
+        z3 = _safe_dem_value(window, interpolated_coor[5], interpolated_coor[4])
+        z4 = _safe_dem_value(window, interpolated_coor[7], interpolated_coor[6])
         Z.append([z1, z2, z3, z4])
     return Z
 
@@ -414,37 +541,86 @@ def computeSaIndex_v(sample_v_points):
     return Sa
 
 
-# merged main processes
-def get_sample_points_vec3(dataset, section_geometry, num_points=100):
-    # change the origin crs of geojson data to 2437
+def _section_pipeline(dataset, section_geometry, num_points):
+    """geometry -> 等分采样点 -> 像素坐标，返回 ``(points, image_coors, interpolated, step)``.
+
+    ``convert_geojson_to_2437`` **就地改写**传入的 geometry（补 features、把经纬度
+    换成投影米），所以这条链全程只能走一次：任何地方再调一遍都会把"米"当成
+    "度"再投一次，整条断面飞出栅格。``section_view`` 与
+    ``get_sample_points_vec3`` 因此共用这一个入口。
+    """
     section_geometry_proj = convert_geojson_to_2437(section_geometry, dataset)
     # sample points in the input section
     sample_points, step = util.divide_line_string(section_geometry_proj, num_points)
-    # the pixel coors of sample_points
+    # the pixel coors of sample_points（全图坐标）
     image_coors = prj2imagexy(dataset, sample_points)
-    # the 4 pixel coors to be interpolated
-    width = dataset.RasterXSize
-    height = dataset.RasterYSize
-    interpolated_coors = get_interpolated_pixel_index(image_coors, width, height)
-    # the elevation of the 4 pixel coors (read the raster once, reuse the array)
-    dem_data, valid_pixels = _load_dem_and_valid_mask(dataset)
-    Z = get_elevation(interpolated_coors, dataset, dem_data)
+    # the 4 pixel coors to be interpolated. clamp 上限必须继续用全图尺寸：换成
+    # 窗口宽高会把"落在栅格外 2 格"的点夹回窗口边缘，读到一个真实高程，
+    # 越界点就伪装成有效点了。
+    interpolated_coors = get_interpolated_pixel_index(
+        image_coors, dataset.RasterXSize, dataset.RasterYSize
+    )
+    return sample_points, image_coors, interpolated_coors, step
+
+
+def _sample_from_coors(sample_points, image_coors, interpolated_coors, window):
+    """按已算好的像素坐标取样，返回 ``(vec3, point_valid)``。"""
+    Z = get_elevation(interpolated_coors, None, window)
     # per-sample contribution of the 4 bilinear corners, used by the nodata guard
-    point_valid = _pixel_quad_validity(interpolated_coors, valid_pixels)
-    # the vec3 of sample points
+    point_valid = _pixel_quad_validity(interpolated_coors, window)
     sample_points_vec3 = bilinear_interpolation(image_coors, Z, sample_points)
+    return sample_points_vec3, point_valid
+
+
+# merged main processes
+def get_sample_points_vec3(dataset, section_geometry, num_points=100,
+                           dem_data=None, valid_pixels=None):
+    sample_points, image_coors, interpolated_coors, step = _section_pipeline(
+        dataset, section_geometry, num_points
+    )
+    # 没有现成窗口时按这 100 个点自建一个：只读采样点所在的那一小块，
+    # 不再像以前那样把整幅 DEM 拉进内存。
+    if dem_data is None or (
+        not isinstance(dem_data, DemWindow) and valid_pixels is None
+    ):
+        box = _dem_window_box(
+            image_coors, dataset.RasterXSize, dataset.RasterYSize
+        )
+        dem_data = _load_dem_window(dataset, box)
+    window = _as_window(dem_data, valid_pixels)
+    sample_points_vec3, point_valid = _sample_from_coors(
+        sample_points, image_coors, interpolated_coors, window
+    )
     return sample_points_vec3, sample_points, step, point_valid
 
 
-def sample_by_points(dataset, points):
+def sample_by_points(dataset, points, dem_data=None):
     # the pixel coors of sample_points
     image_coors = prj2imagexy(dataset, points)
-    # the 4 pixel coors to be interpolated
     width = dataset.RasterXSize
     height = dataset.RasterYSize
     interpolated_coors = get_interpolated_pixel_index(image_coors, width, height)
-    # the elevation of the 4 pixel coors
-    Z = get_elevation(interpolated_coors, dataset)
+    if dem_data is None:
+        window = _load_dem_window(
+            dataset, _dem_window_box(image_coors, width, height)
+        )
+    else:
+        window = _as_window(dem_data)
+        if not _window_covers(window, interpolated_coors, width, height):
+            # 侵蚀参考线的点理论上落在断面包络里（divide_point_line 是在已有点上
+            # 连折线再等分）。万一真跑出去了，按这批点重开一个窗口——多读一两 KB，
+            # 好过悄悄返回 NaN 把侵蚀模型喂坏。
+            box = _dem_window_box(image_coors, width, height)
+            _debug_log(
+                "dem_window_miss",
+                {
+                    "window": [window.xoff, window.yoff, window.shape],
+                    "reloaded_box": list(box),
+                    "points": len(points),
+                },
+            )
+            window = _load_dem_window(dataset, box)
+    Z = get_elevation(interpolated_coors, dataset, window)
     # the vec3 of sample points
     sample_points_vec3 = bilinear_interpolation(image_coors, Z, points)
     return sample_points_vec3
@@ -468,8 +644,34 @@ def section_view(dem_path, section_geometry, output_path):
 
     geometry = copy.deepcopy(section_geometry)
     num_points = 100
-    sample_points_vec3, scatters, step, point_valid = get_sample_points_vec3(
+    # 断面走多远就只读多远：100 个采样点的整数包络外扩 2 格、再夹回栅格，就是
+    # ReadAsArray 的全部范围。断面采样与下面两条侵蚀参考线共用这一块。
+    scatters, image_coors, interpolated_coors, step = _section_pipeline(
         dataset, geometry, num_points
+    )
+    window = _load_dem_window(
+        dataset,
+        _dem_window_box(image_coors, dataset.RasterXSize, dataset.RasterYSize),
+    )
+    _debug_log(
+        "dem_window",
+        {
+            "raster": [dataset.RasterXSize, dataset.RasterYSize],
+            "offset_xy": [window.xoff, window.yoff],
+            "size_wh": [window.shape[1], window.shape[0]],
+            "bytes": int(window.data.size * window.data.itemsize),
+            "section_rows": [
+                min(coor[0] for coor in image_coors),
+                max(coor[0] for coor in image_coors),
+            ],
+            "section_cols": [
+                min(coor[1] for coor in image_coors),
+                max(coor[1] for coor in image_coors),
+            ],
+        },
+    )
+    sample_points_vec3, point_valid = _sample_from_coors(
+        scatters, image_coors, interpolated_coors, window
     )
 
     # ---- nodata guard -------------------------------------------------------
@@ -563,8 +765,8 @@ def section_view(dem_path, section_geometry, output_path):
         scatters, 23, dataset.GetProjection()
     )
 
-    points_er_verified = sample_by_points(dataset, er_point_coords_verified)
-    points_er = sample_by_points(dataset, er_point_coords)
+    points_er_verified = sample_by_points(dataset, er_point_coords_verified, window)
+    points_er = sample_by_points(dataset, er_point_coords, window)
 
     # Get the slope ratio at the vertical direction
     start_index = sample_points_vec3.index(

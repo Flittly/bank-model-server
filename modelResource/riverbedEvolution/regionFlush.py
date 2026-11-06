@@ -187,20 +187,115 @@ def color_mapping(value, min, max, noData):
     return r, g, b, a
 
 
+COLOR_LUT_MAX_SPAN = 2048
+COLOR_PNG_CHUNK_ROWS = 256
+
+# color_mapping 的入参是 image_array[y, x]，即 np.float32 **标量**，它与 Python float
+# 运算后的 dtype 由 numpy 版本决定，必须在运行时探测而不是写死：
+#   numpy >= 2.0（NEP 50）: np.float32 标量 - Python float -> float32
+#   numpy  1.x（部署容器 1.26.4）:                          -> float64
+# 写死 float32 会让容器里的索引截断边界与旧实现错开，颜色差一档。
+_SCALAR_MATH_DTYPE = (np.float32(0.0) - 0.0).dtype
+
+
+def _color_index(values, min_value, max_value):
+    """复刻 color_mapping 的运算链，返回尚未截断的索引浮点。
+
+    dtype 跟随 _SCALAR_MATH_DTYPE，保证标量路径与数组路径在同环境下精度一致；
+    (max - min) 仍用 Python float 计算，与旧实现的运算顺序一致。
+    """
+    work = values if values.dtype == _SCALAR_MATH_DTYPE else values.astype(_SCALAR_MATH_DTYPE)
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        return (work - min_value) / (max_value - min_value) * 255.0
+
+
+def _build_jet_lut(k_lo, k_hi):
+    """按截断后的整数索引预生成 jet 色表，k 与 jet_color_map 的入参同义。"""
+    lut = np.empty((k_hi - k_lo + 1, 4), dtype=np.uint8)
+    for offset, k in enumerate(range(k_lo, k_hi + 1)):
+        lut[offset] = jet_color_map(k)
+    return lut
+
+
+def _lut_colorize(image_array, min_value, max_value, nodata):
+    """用色表批量上色。任一块不适合查表时返回 None，交由标量路径兜底。"""
+    height, width = image_array.shape[:2]
+    if nodata is None:
+        return None
+
+    nodata_int = int(nodata)
+    k_lo = None
+    k_hi = None
+
+    # 第一遍只求色表索引的真实上下界，不对整幅建中间数组（省内存）。
+    for y0 in range(0, height, COLOR_PNG_CHUNK_ROWS):
+        block = image_array[y0 : y0 + COLOR_PNG_CHUNK_ROWS]
+        if np.isnan(block).any():
+            return None
+        index = _color_index(block, min_value, max_value)
+        if not np.all(np.isfinite(index)):
+            return None
+        valid = block.astype(np.int32) != nodata_int
+        if not valid.any():
+            continue
+        subset = index[valid]
+        block_lo = int(subset.min())
+        block_hi = int(subset.max())
+        k_lo = block_lo if k_lo is None else min(k_lo, block_lo)
+        k_hi = block_hi if k_hi is None else max(k_hi, block_hi)
+        if k_hi - k_lo > COLOR_LUT_MAX_SPAN:
+            return None
+
+    if k_lo is None:
+        return np.zeros((height, width, 4), dtype=np.uint8)
+
+    lut = _build_jet_lut(k_lo, k_hi)
+    rgba_array = np.zeros((height, width, 4), dtype=np.uint8)
+
+    for y0 in range(0, height, COLOR_PNG_CHUNK_ROWS):
+        y1 = min(y0 + COLOR_PNG_CHUNK_ROWS, height)
+        block = image_array[y0:y1]
+        # nodata 像素代入公式会算出极负的索引，必须先占位再统一置零，
+        # 否则 lut[index - k_lo] 直接越界。
+        index = _color_index(block, min_value, max_value).astype(np.int32)
+        is_nodata = block.astype(np.int32) == nodata_int
+        index[is_nodata] = k_lo
+        output = rgba_array[y0:y1]
+        output[...] = lut[index - k_lo]
+        output[is_nodata] = 0
+
+    return rgba_array
+
+
 def tif_to_colorPng(input_tif, output_png):
     with Image.open(input_tif) as image:
         image_array = np.array(image).astype(np.float32)
         width, height = image.size
 
     min, max, nodata = get_tif_attributes(input_tif)
-    rgba_array = np.zeros((height, width, 4), dtype=np.uint8)
 
-    for y in range(height):
-        for x in range(width):
-            pixel = image_array[y, x]
-            r, g, b, a = color_mapping(pixel, min, max, nodata)
-            # rgba_array[y, x] = np.array([r, g, b, a]).astype(np.uint8)
-            rgba_array[y, x] = [r, g, b, a]
+    rgba_array = _lut_colorize(image_array, min, max, nodata)
+    mode = "lut"
+    if rgba_array is None:
+        # 兜底：与原实现逐像素一致（NaN / nodata 缺失 / 索引跨度过大时走这里）
+        mode = "legacy_loop"
+        rgba_array = np.zeros((height, width, 4), dtype=np.uint8)
+        for y in range(height):
+            for x in range(width):
+                pixel = image_array[y, x]
+                r, g, b, a = color_mapping(pixel, min, max, nodata)
+                rgba_array[y, x] = [r, g, b, a]
+
+    _debug_log(
+        "colorize_mode",
+        {
+            "mode": mode,
+            "size": [width, height],
+            "min": min,
+            "max": max,
+            "nodata": nodata,
+        },
+    )
 
     output_image = Image.fromarray(rgba_array, "RGBA")
     output_image.save(output_png)
@@ -227,6 +322,76 @@ def get_bound_coords(output_tif: str) -> dict:
 def delete_temporary_files() -> None:
     driver = ogr.GetDriverByName("ESRI Shapefile")
     driver.DeleteDataSource("temporary_mask.shp")
+
+
+SUBTRACT_CHUNK_ROWS = 512
+
+
+def _subtract_fully_aligned(
+    data1,
+    data2,
+    nodata1,
+    nodata2,
+    height,
+    width,
+    start_col1,
+    end_col1,
+    start_col2,
+    end_col2,
+    start_row1,
+    end_row1,
+    start_row2,
+    end_row2,
+):
+    """判断能否安全走整幅向量化相减。
+
+    原实现里 r/c 越界、val1/val2 取 default_value 的分支，只有在两幅 DEM
+    起点或范围不一致时才会生效；那些分支的循环范围与取值判断本身错位
+    （range 到 end_col2 却按 end_col1 取值），属于既有行为，不做修正。
+    这里只在“交集恰好等于整幅且两幅完全重合”时走快路径，其余一律回退，
+    保证快路径的语义等价于原循环里所有分支都不触发的那条唯一通路。
+    """
+    if nodata1 is None or nodata2 is None:
+        return False
+    if data1.dtype != np.float32 or data2.dtype != np.float32:
+        return False
+    if data1.shape != (height, width) or data2.shape != (height, width):
+        return False
+    return (
+        start_col1 == 0
+        and start_col2 == 0
+        and end_col1 == width
+        and end_col2 == width
+        and start_row1 == 0
+        and start_row2 == 0
+        and end_row1 == height
+        and end_row2 == height
+    )
+
+
+def _subtract_aligned(data1, data2, nodata1, nodata2, default_value):
+    """整幅向量化相减，按行分块以压住内存峰值。
+
+    无效条件与原循环逐条对应：val1/val2 任一等于各自 nodata，或任一等于
+    default_value。漏掉 default_value 这一条，在输入里恰好出现 -9999 时
+    会算出 -9999-x 而不是回落成 -9999。
+    """
+    height, width = data1.shape
+    array = np.full((height, width), default_value, dtype=np.float32)
+    for row_start in range(0, height, SUBTRACT_CHUNK_ROWS):
+        row_end = min(row_start + SUBTRACT_CHUNK_ROWS, height)
+        block1 = data1[row_start:row_end]
+        block2 = data2[row_start:row_end]
+        segment = array[row_start:row_end]
+        np.subtract(block1, block2, out=segment)
+        invalid = (
+            (block1 == nodata1)
+            | (block2 == nodata2)
+            | (block1 == default_value)
+            | (block2 == default_value)
+        )
+        segment[invalid] = default_value
+    return array
 
 
 # 全江冲淤
@@ -310,39 +475,80 @@ def global_flush_func(bench_path, ref_path, output_path, default_value=-9999.0):
     end_row2 = int((min_y - transform2[3]) / transform2[5])
 
     # 相减并处理NoData值
-    array = np.full((height, width), fill_value=default_value)
-    for row in range(start_row1, end_row1):
-        for col in range(start_col1, end_col2):
-            # Use relative coordinates (r, c) for the 'array' which has size (height, width)
-            # row and col are global coordinates in the source raster
-            r = row - start_row1
-            c = col - start_col1
+    fast_path = _subtract_fully_aligned(
+        data1,
+        data2,
+        nodata1,
+        nodata2,
+        height,
+        width,
+        start_col1,
+        end_col1,
+        start_col2,
+        end_col2,
+        start_row1,
+        end_row1,
+        start_row2,
+        end_row2,
+    )
 
-            if r >= height or c >= width:
-                continue
+    if fast_path:
+        array = _subtract_aligned(data1, data2, nodata1, nodata2, default_value)
+    else:
+        array = np.full((height, width), fill_value=default_value)
+        for row in range(start_row1, end_row1):
+            for col in range(start_col1, end_col2):
+                # Use relative coordinates (r, c) for the 'array' which has size (height, width)
+                # row and col are global coordinates in the source raster
+                r = row - start_row1
+                c = col - start_col1
 
-            val1 = (
-                data1[row][col] if row < end_row1 and col < end_col1 else default_value
-            )
-            val2 = (
-                data2[row - (start_row1 - start_row2)][col - (start_col1 - start_col2)]
-                if row >= start_row2
-                and row < end_row2
-                and col >= start_col2
-                and col < end_col2
-                else default_value
-            )
+                if r >= height or c >= width:
+                    continue
 
-            if (
-                val1 == nodata1
-                or val2 == nodata2
-                or val1 == default_value
-                or val2 == default_value
-            ):
-                array[r, c] = default_value
-            else:
-                result = val1 - val2
-                array[r, c] = result
+                val1 = (
+                    data1[row][col]
+                    if row < end_row1 and col < end_col1
+                    else default_value
+                )
+                val2 = (
+                    data2[row - (start_row1 - start_row2)][
+                        col - (start_col1 - start_col2)
+                    ]
+                    if row >= start_row2
+                    and row < end_row2
+                    and col >= start_col2
+                    and col < end_col2
+                    else default_value
+                )
+
+                if (
+                    val1 == nodata1
+                    or val2 == nodata2
+                    or val1 == default_value
+                    or val2 == default_value
+                ):
+                    array[r, c] = default_value
+                else:
+                    result = val1 - val2
+                    array[r, c] = result
+
+    _debug_log(
+        "subtract_mode",
+        {
+            "mode": "aligned_vector" if fast_path else "legacy_loop",
+            "size": [width, height],
+            "window": {
+                "col1": [start_col1, end_col1],
+                "col2": [start_col2, end_col2],
+                "row1": [start_row1, end_row1],
+                "row2": [start_row2, end_row2],
+            },
+            "nodata": [nodata1, nodata2],
+            "dtype": [str(data1.dtype), str(data2.dtype)],
+        },
+    )
+
     output_dataset.GetRasterBand(1).WriteArray(array)
 
     # 设置输出数据集的NoData值
