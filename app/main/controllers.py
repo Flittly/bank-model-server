@@ -488,3 +488,26 @@ def extract_tiff_bounds(tiff_key: str) -> dict[str, Any]:
         "max_y": bounds["max_y"],
         "srid": bounds.get("srid", 3857),
     }
+
+
+def preview_dem(tiff_key: str, *, max_size: int | None = None) -> tuple[bytes, dict[str, Any]]:
+    """按 tiff_key 生成 DEM 预览图（灰度高程 + 红色 nodata）。
+
+    与 :func:`extract_tiff_bounds` 用同一套 ``tiff_key → 路径`` 解析规则：``tiff_key`` 里
+    第 1 段是河段、第 4 段是时间点，其余交给 :func:`util.rustfs.resolve_tiff_path`
+    按候选路径查找（它同时支持本地目录与 RustFS 回源）。
+    """
+    from model.demPreview import render_dem_preview
+    from util.rustfs import resolve_tiff_path
+
+    if not tiff_key:
+        raise ValueError("tiff_key 不能为空")
+
+    parts = tiff_key.split("/")
+    segment = parts[1] if len(parts) > 1 else ""
+    timepoint = parts[4] if len(parts) > 4 else None
+
+    tiff_path = resolve_tiff_path(tiff_key, segment=segment, timepoint=timepoint)
+    png_bytes, meta = render_dem_preview(tiff_path, max_size=max_size)
+    meta["tiff_key"] = tiff_key
+    return png_bytes, meta

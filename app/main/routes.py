@@ -4,7 +4,7 @@ import zipfile
 from typing import Any
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 import config
 import util
@@ -430,6 +430,57 @@ async def extract_tiff_bounds_api(request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def _header_number(value: Any, digits: int = 8) -> str:
+    """把数值转成可放进 HTTP 头的字符串；空值变空串（调用方按缺省处理）。"""
+    if value is None:
+        return ""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if number != number or number in (float("inf"), float("-inf")):  # NaN / Inf
+        return ""
+    return f"{number:.{digits}f}"
+
+
+@api_router.get("/v0/dem/preview")
+async def dem_preview_api(
+    tiff_key: str = Query(..., description="DEM 的 tiff 资源键"),
+    max_size: int = Query(0, description="输出长边像素上限，0 = 用服务端默认值"),
+) -> Response:
+    """DEM 栅格预览：有效高程按灰度渲染，nodata/-9999 渲染为纯红。
+
+    返回 PNG 本体；地理范围与色标信息放 ``X-Dem-*`` 响应头，调用方
+    （Java 网关 → 前端）不用再查一次边界接口就能把图贴到正确位置。
+    """
+    try:
+        png_bytes, meta = controllers.preview_dem(tiff_key, max_size=max_size or None)
+    except FileNotFoundError as exc:
+        raise handle_not_found(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    headers = {
+        "X-Dem-West": _header_number(meta.get("west")),
+        "X-Dem-South": _header_number(meta.get("south")),
+        "X-Dem-East": _header_number(meta.get("east")),
+        "X-Dem-North": _header_number(meta.get("north")),
+        "X-Dem-Width": str(meta.get("width") or ""),
+        "X-Dem-Height": str(meta.get("height") or ""),
+        "X-Dem-Min": _header_number(meta.get("min"), 3),
+        "X-Dem-Max": _header_number(meta.get("max"), 3),
+        "X-Dem-Low": _header_number(meta.get("low"), 3),
+        "X-Dem-High": _header_number(meta.get("high"), 3),
+        "X-Dem-Nodata": _header_number(meta.get("nodata"), 3),
+        "X-Dem-Nodata-Ratio": _header_number(meta.get("nodata_ratio"), 4),
+        # 同一份 DEM 的预览图不会变（缓存键含 mtime+size），让浏览器与网关都放手缓存
+        "Cache-Control": "public, max-age=3600",
+    }
+    return Response(content=png_bytes, media_type="image/png", headers=headers)
 
 
 @api_router.post("/api/v1/tiff/register")
