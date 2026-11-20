@@ -130,7 +130,9 @@ def color_mapping(value, min, max, noData):
     b: int = 0
     a: int = 255
 
-    if int(value) == noData or math.isnan(value):
+    # 必须先判 NaN / ±Inf：int(float('nan')) 会抛 ValueError，
+    # 写在 int() 之后会让 math.isnan 这道保护永远执行不到。
+    if not math.isfinite(value) or int(value) == noData:
         a = 0
         return r, g, b, a
 
@@ -157,6 +159,18 @@ def tif_to_colorPng(input_tif, output_png):
 
     output_image = Image.fromarray(rgba_array, "RGBA")
     output_image.save(output_png)
+
+
+def _write_result_png_if_enabled(input_tif, output_png):
+    """按配置开关决定是否生成伪彩色 PNG，返回是否真的生成。
+
+    PNG 只是展示产物，不参与任何数值计算；开关关闭时连文件都不落盘，
+    run_river_volume_mcr 也不会在响应里声明该文件名。
+    """
+    if not config.MODEL_RESULT_PNG_ENABLED:
+        return False
+    tif_to_colorPng(input_tif, output_png)
+    return True
 
 
 def geo2lonlat(prj, x, y):
@@ -285,7 +299,7 @@ def compute_volume(depth, region_geometry, in_raster_path, output_path):
     new_band.SetNoDataValue(-9999)
     new_dataset = None
 
-    tif_to_colorPng(result_path, visual_path)
+    _write_result_png_if_enabled(result_path, visual_path)
 
     bound_coords_pro = get_bound_coords(result_path)
     bound_coords_geo = {}
@@ -317,12 +331,10 @@ def compute_volume(depth, region_geometry, in_raster_path, output_path):
         },
     )
 
-    return {
-        "raw_json": "volume.json",
-        "raw_txt": "volume.txt",
-        "raw_tif": "volume.tif",
-        "visualize-file": "volume.png",
-    }
+    # 这里原本 return 了一组带 PNG 文件名的结果 dict，但
+    # run_river_volume_mcr 调用本函数时直接丢弃返回值，那组 dict 从未
+    # 进入 response.json（死代码，已移除）。对外响应统一在
+    # run_river_volume_mcr 里构造。
 
 
 ##########################################################################################
@@ -350,13 +362,17 @@ def run_river_volume_mcr(mcr: model.ModelCaseReference):
 
     compute_volume(depth, region_geometry, dem_path, output_path)
 
-    return {
+    response = {
         "case-id": mcr.id,
         "extent-json": "volume.json",
         "raw-tif": "volume.tif",
-        "visualization-png": "volume.png",
         "volume-summary-txt": "volume.txt",
     }
+    # 不生成 PNG 时不要声明一个不存在的文件名；RESPONSING 的占位模板
+    # （visualization-png = "NONE"）会保留，语义一致。
+    if config.MODEL_RESULT_PNG_ENABLED:
+        response["visualization-png"] = "volume.png"
+    return response
 
 
 ##########################################################################################

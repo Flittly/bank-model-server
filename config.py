@@ -22,6 +22,23 @@ def _env_flag(name: str, default: bool = False) -> bool:
 APP_PORT = int(os.getenv("APP_PORT", "8088"))
 APP_DEBUG = _env_flag("APP_DEBUG", True)
 
+# ---------------------------------------------------------------------------
+# 结果 PNG（TIF -> RGBA 伪彩色）生成开关
+#
+# 产物为 case/<id>/result/ 下的 volume.png / flush.png，只在响应里以
+# visualization-png 字段声明，Java 后端与前端均无下游消费（历史 3402 个
+# case 中 volume.png 0 个、flush.png 1 个）。默认关闭可省去一次全图着色
+# 与落盘；需要论文/演示配图时打开即可，业务数值结果完全不受影响。
+#
+# 三种设置方式（优先级由低到高：改这里 / .env / 容器 environment）：
+#   1) 直接把下面的默认值改成 True
+#   2) bank-model-server/.env 里写 MODEL_RESULT_PNG_ENABLED=1
+#   3) docker-compose.yml 的 model 服务加 environment:
+#        MODEL_RESULT_PNG_ENABLED: "1"
+# 取值：1 / true / yes / on 为开，其余（含不设）为关。
+# ---------------------------------------------------------------------------
+MODEL_RESULT_PNG_ENABLED = _env_flag("MODEL_RESULT_PNG_ENABLED", False)
+
 # API Version
 API_VERSION = "/v0"
 

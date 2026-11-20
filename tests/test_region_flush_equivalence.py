@@ -223,3 +223,93 @@ def test_subtract_fully_aligned_requires_full_overlap():
 
     float64 = data.astype(np.float64)
     assert not _subtract_fully_aligned(float64, data, **limits)
+
+
+# ---------------------------------------------------------------------------
+# 结果 PNG 开关 / color_mapping 的 NaN 保护（2026-11-20）
+#
+# 原实现写的是 `if int(value) == noData or math.isnan(value)`：
+# int(float('nan')) 会先抛 ValueError，导致 isnan 这道保护永远执行不到。
+# regionFlush 的 _lut_colorize 遇到 NaN 又恰好回退到这个标量循环，
+# 所以这不是「理论隐患」，而是真实可达的崩溃路径。
+# ---------------------------------------------------------------------------
+
+def _both_colorize_modules():
+    from modelResource.riverbedEvolution import riverVolume
+
+    return regionFlush, riverVolume
+
+
+def test_result_png_env_flag_parsing(monkeypatch):
+    import config
+
+    for value in ("1", "true", "YES", "on", " ON "):
+        monkeypatch.setenv("MODEL_RESULT_PNG_ENABLED", value)
+        assert config._env_flag("MODEL_RESULT_PNG_ENABLED", False) is True
+    for value in ("0", "false", "", "no", "off"):
+        monkeypatch.setenv("MODEL_RESULT_PNG_ENABLED", value)
+        assert config._env_flag("MODEL_RESULT_PNG_ENABLED", False) is False
+    monkeypatch.delenv("MODEL_RESULT_PNG_ENABLED")
+    assert config._env_flag("MODEL_RESULT_PNG_ENABLED", True) is True
+    assert config._env_flag("MODEL_RESULT_PNG_ENABLED", False) is False
+
+
+def test_write_result_png_respects_toggle(monkeypatch):
+    import config
+
+    for module in _both_colorize_modules():
+        calls = []
+        monkeypatch.setattr(
+            module,
+            "tif_to_colorPng",
+            lambda a, b, calls=calls: calls.append((a, b)),
+        )
+
+        monkeypatch.setattr(config, "MODEL_RESULT_PNG_ENABLED", False)
+        assert module._write_result_png_if_enabled("in.tif", "out.png") is False
+        assert calls == []
+
+        monkeypatch.setattr(config, "MODEL_RESULT_PNG_ENABLED", True)
+        assert module._write_result_png_if_enabled("in.tif", "out.png") is True
+        assert calls == [("in.tif", "out.png")]
+
+
+def test_color_mapping_finite_values_bitwise_unchanged():
+    """只把 NaN 判断提前，有限值分支必须与原实现逐位一致。"""
+    import math
+
+    jet_color_map = regionFlush.jet_color_map
+
+    def original(value, mn, mx, nodata):
+        r, g, b, a = 0, 0, 0, 255
+        if int(value) == nodata or math.isnan(value):
+            a = 0
+            return r, g, b, a
+        return jet_color_map(((value - mn) / (mx - mn)) * 255.0)
+
+    values = [-9999.0, -8.0, -7.5, 0.0, 0.1, 2.0, 7.9, 12.0, 20.0, 255.0]
+    for module in _both_colorize_modules():
+        for value in values:
+            assert module.color_mapping(value, -8.0, 12.0, -9999.0) == original(
+                value, -8.0, 12.0, -9999.0
+            )
+
+
+def test_color_mapping_nan_and_inf_are_transparent_not_exceptions():
+    for module in _both_colorize_modules():
+        for bad in (float("nan"), float("inf"), -float("inf")):
+            assert module.color_mapping(bad, -8.0, 12.0, -9999.0) == (0, 0, 0, 0)
+
+
+def test_lut_nan_fallback_path_is_safe():
+    """_lut_colorize 遇 NaN 返回 None -> 回退标量循环，该循环不再崩。"""
+    image = np.array([[1.0, 2.0], [np.nan, 3.0]], dtype=np.float32)
+    assert _lut_colorize(image, -8.0, 12.0, -9999.0) is None
+    rgba = np.zeros((2, 2, 4), dtype=np.uint8)
+    for row in range(2):
+        for col in range(2):
+            rgba[row, col] = regionFlush.color_mapping(
+                image[row, col], -8.0, 12.0, -9999.0
+            )
+    assert tuple(rgba[1, 0]) == (0, 0, 0, 0)
+    assert rgba[0, 0, 3] == 255

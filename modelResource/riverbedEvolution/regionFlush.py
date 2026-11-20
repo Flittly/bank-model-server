@@ -177,7 +177,10 @@ def color_mapping(value, min, max, noData):
     b: int = 0
     a: int = 255
 
-    if int(value) == noData or math.isnan(value):
+    # 必须先判 NaN / ±Inf：int(float('nan')) 会抛 ValueError。
+    # _lut_colorize 遇到 NaN 会返回 None 回退到这里的标量路径，
+    # 所以这道保护不只是兜底，而是真实可达的分支。
+    if not math.isfinite(value) or int(value) == noData:
         a = 0
         return r, g, b, a
 
@@ -299,6 +302,18 @@ def tif_to_colorPng(input_tif, output_png):
 
     output_image = Image.fromarray(rgba_array, "RGBA")
     output_image.save(output_png)
+
+
+def _write_result_png_if_enabled(input_tif, output_png):
+    """按配置开关决定是否生成伪彩色 PNG，返回是否真的生成。
+
+    全江/区域冲淤的 flush.tif 才是下游模型真正消费的产物；flush.png
+    没有下游，开关关闭时连文件都不落盘，响应里也不会声明该文件名。
+    """
+    if not config.MODEL_RESULT_PNG_ENABLED:
+        return False
+    tif_to_colorPng(input_tif, output_png)
+    return True
 
 
 def get_bound_coords(output_tif: str) -> dict:
@@ -561,7 +576,7 @@ def global_flush_func(bench_path, ref_path, output_path, default_value=-9999.0):
     dem2_dataset = None
     output_dataset = None
 
-    tif_to_colorPng(output_tif, output_png)
+    _write_result_png_if_enabled(output_tif, output_png)
 
     prj = get_raster_projection(output_tif)
 
@@ -586,7 +601,12 @@ def global_flush_func(bench_path, ref_path, output_path, default_value=-9999.0):
             "bench": _dataset_debug_info(bench_path),
             "ref": _dataset_debug_info(ref_path),
             "output_tif": _dataset_debug_info(output_tif),
-            "output_png": os.path.abspath(output_png),
+            "png_generated": config.MODEL_RESULT_PNG_ENABLED,
+            "output_png": (
+                os.path.abspath(output_png)
+                if config.MODEL_RESULT_PNG_ENABLED
+                else None
+            ),
             "output_coords": os.path.abspath(output_coords),
         },
     )
@@ -623,7 +643,7 @@ def region_flush_func(flush_all_path: str, region_geometry: dict, output_path: s
     poly = create_geometry(coords_pro)  # 根据裁剪区域点创建面要素
     create_mask(poly, prj)  # 根据面要素创建掩膜
     clip_raster(global_result_directory, output_tif)  # 使用掩膜对全江冲淤结果进行裁剪
-    tif_to_colorPng(output_tif, output_png)
+    _write_result_png_if_enabled(output_tif, output_png)
 
     bound_coords_pro = get_bound_coords(output_tif)
     bound_coords_geo = {}
@@ -690,12 +710,14 @@ def run_global_flush_mcr(mcr: MCR):
 
     global_flush_func(bench_path, ref_path, output_path)
 
-    return {
+    response = {
         "case-id": mcr.id,
         "raw-tif": "flush.tif",
         "extent-json": "flush.json",
-        "visualization-png": "flush.png",
     }
+    if config.MODEL_RESULT_PNG_ENABLED:
+        response["visualization-png"] = "flush.png"
+    return response
 
 
 ##########################################################################################
@@ -724,12 +746,14 @@ def run_region_flush_mcr(mcr: MCR):
 
     region_flush_func(global_output_path, region_geometry, output_path)
 
-    return {
+    response = {
         "case-id": mcr.id,
         "raw-tif": "flush.tif",
         "extent-json": "flush.json",
-        "visualization-png": "flush.png",
     }
+    if config.MODEL_RESULT_PNG_ENABLED:
+        response["visualization-png"] = "flush.png"
+    return response
 
 
 ##########################################################################################
