@@ -4,6 +4,7 @@ import time
 import queue
 import config
 import threading
+import collections
 import subprocess
 import multiprocessing
 
@@ -243,25 +244,71 @@ def safe_launcher(command: list[str]) -> subprocess.Popen | None:
 def daemon_process(process_queue: queue.Queue[any]):
     print("Daemon process is working", flush=True)
 
+    # task_queue 记录「已占用的执行槽位」。daemon 目前单线程，这把锁是零争用的；
+    # 但槽位判断是典型的 check-then-act，将来派发改并发时这层互斥必须已经在。
     task_queue = set()
-    deferred_queue = []
+    task_queue_lock = threading.Lock()
+    # deque 而非 list：原来 deferred_queue.pop(0) 是 O(n) 且非线程安全，
+    # 命令积压时每轮空转都要把整个列表搬一遍。
+    deferred_queue: collections.deque[list[str]] = collections.deque()
+    last_scan_at = 0.0
 
-    def update_task_queue():
-        # Remove completed or error model cases
-        task_queue.intersection_update(
-            {id for id in task_queue if not MCR.is_case_done(id)}
-        )
+    def update_task_queue(force: bool = False) -> None:
+        """清理已结束的 case，把槽位还回来。
+
+        单次 is_case_done 实测 0.155ms（open_case + 读 status 目录名），32 个就是 4.9ms。
+        原来每条命令都全量扫一遍，是派发路径上一笔纯浪费，所以改成时间节流：
+        距上次扫描不足 MODEL_DAEMON_SCAN_INTERVAL_SECONDS 时直接跳过。
+
+        节流的副作用是 task_queue 会短暂残留已完成的 id、看起来「槽位满」，
+        所以 reserve_slot 判满时用 force=True 精确复核一次，不会误拒任务。
+        """
+        nonlocal last_scan_at
+        now = time.monotonic()
+        if not force and (now - last_scan_at) < config.MODEL_DAEMON_SCAN_INTERVAL_SECONDS:
+            return
+        last_scan_at = now
+        with task_queue_lock:
+            # 先快照再遍历：并发下直接迭代 task_queue 会抛
+            # RuntimeError: Set changed size during iteration
+            stale = [id for id in list(task_queue) if MCR.is_case_done(id)]
+            for id in stale:
+                task_queue.discard(id)
+
+    def reserve_slot(case_id: str) -> str:
+        """原子地占一个执行槽位，返回 ok / duplicate / full。
+
+        原写法把「还有没有名额」的判断和「把 id 加进 task_queue」隔开了两次写盘的距离。
+        单线程下没人插队所以安全；多线程下 8 个 worker 会同时读到「还剩 1 个」而一起放行。
+        这里把判断与占用收进同一把锁。
+
+        顺带修了差一：上限是 MAX 个槽位，原来的 `len(task_queue) <= MAX`
+        会放行第 MAX+1 个。
+        """
+        with task_queue_lock:
+            if case_id in task_queue:
+                return "duplicate"
+            if len(task_queue) >= config.MAX_RUNNING_MODEL_CASE_NUM:
+                return "full"
+            task_queue.add(case_id)
+            return "ok"
+
+    def release_slot(case_id: str) -> None:
+        with task_queue_lock:
+            task_queue.discard(case_id)
 
     def try_to_run_case(command):
         id = command[-1]
         update_task_queue()
         mcr = MCR.open_case(id)
 
-        if (
-            len(task_queue) <= config.MAX_RUNNING_MODEL_CASE_NUM
-            and id not in task_queue
-        ):
-            task_queue.add(id)
+        slot = reserve_slot(id)
+        if slot == "full":
+            # 节流窗口内残留的已结束 case 会造成假「满」，精确复核一次再判。
+            update_task_queue(force=True)
+            slot = reserve_slot(id)
+
+        if slot == "ok":
             if mcr is not None:
                 mcr.set_runtime(
                     stage="launching",
@@ -276,17 +323,17 @@ def daemon_process(process_queue: queue.Queue[any]):
             # 关键：句柄不再丢弃。safe_launcher 会起一个监控线程盯着退出码，
             # 子进程非正常退出时把 case 标成 ERROR（否则它会永远停在 LOCK）。
             if safe_launcher(command) is None:
-                task_queue.discard(id)
+                release_slot(id)
             return True
-        else:
-            if mcr is not None:
-                mcr.set_runtime(
-                    stage="waiting_slot",
-                    progress=10,
-                    message="Waiting for an available execution slot",
-                    status="pending",
-                )
-            return False
+
+        if mcr is not None:
+            mcr.set_runtime(
+                stage="waiting_slot",
+                progress=10,
+                message="Waiting for an available execution slot",
+                status="pending",
+            )
+        return False
 
     # Return 0: False, 1: True, 2: Error
     def ready_for_core_case(command: list[str]):
@@ -356,23 +403,21 @@ def daemon_process(process_queue: queue.Queue[any]):
 
         return True
 
-    def waiting():
-        command = process_queue.get()
-        process_queue.put(command)
-
     # Task loop
     while True:
         try:
             command = process_queue.get_nowait()
-
-            if not execute_(command):
-                print("Daemon process stopped", flush=True)
-                break
-
         except queue.Empty:
             while deferred_queue:
-                process_queue.put(deferred_queue.pop(0))
-            waiting()
+                process_queue.put(deferred_queue.popleft())
+            # 阻塞等新命令。原写法是 get() 取到队首后立刻 put() 放回队尾，
+            # [A, B, C] 会变成 [B, C, A] —— FIFO 顺序被打乱，先提交的可能后执行。
+            # 这里直接取出来交给下一轮执行，顺序不再经过队列。
+            command = process_queue.get()
+
+        if not execute_(command):
+            print("Daemon process stopped", flush=True)
+            break
 
 
 ####################################################################################################

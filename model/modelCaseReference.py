@@ -130,7 +130,13 @@ class ModelCaseReference:
             raise
 
     @staticmethod
-    def _write_json_atomic(path: str, payload: Any) -> None:
+    def _write_json_atomic(path: str, payload: Any, durable: bool = True) -> None:
+        """原子写：先写 .tmp 再 os.replace 换名，读者永远看不到中间态。
+
+        durable=False 跳过 fsync，只保证「进程崩溃后可见」，不保证「断电后可见」。
+        只给 runtime.json 这类进度条用——它在掉电后丢了无害（下次 set_runtime 重写），
+        而每次 set_runtime 都是一条派发命令的常驻成本。response.json 等产出物必须 durable。
+        """
         directory = os.path.dirname(path)
         os.makedirs(directory, exist_ok=True)
         temp_path = f"{path}.tmp"
@@ -138,7 +144,8 @@ class ModelCaseReference:
         with open(temp_path, "w", encoding="utf-8") as file:
             json.dump(payload, file, indent=4, ensure_ascii=False)
             file.flush()
-            os.fsync(file.fileno())
+            if durable:
+                os.fsync(file.fileno())
 
         last_error: PermissionError | None = None
         for _ in range(5):
@@ -508,7 +515,10 @@ class ModelCaseReference:
             if meta is not None:
                 current["meta"] = meta
 
-            ModelCaseReference._write_json_atomic(runtime_path, current)
+            # durable=False：runtime.json 是进度条，不是账本。每推进一个阶段都写一次，
+            # 一次 fsync 实测 1.34ms，而它掉电丢了只是「下一次轮询少看到一个中间态」。
+            # 真正不能丢的产出（response.json）走 make_response，仍是 durable=True。
+            ModelCaseReference._write_json_atomic(runtime_path, current, durable=False)
             portalocker.unlock(lock_file)
 
         return current

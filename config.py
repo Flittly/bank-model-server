@@ -189,6 +189,12 @@ CAL_CORE_NUM = 5
 # 但那个队列是忙轮询的，堆太多会空转吃满一个核 —— 所以宁可提前把数算准。
 # 改这里不需要改 Java；但改 Java 的 parallelism 时务必回来同步这一项。
 MAX_RUNNING_MODEL_CASE_NUM = int(os.getenv("MAX_RUNNING_MODEL_CASE_NUM", "32"))
+# daemon 清理「已结束 case」的最小间隔（秒）。清理动作是逐个 is_case_done（实测 0.155ms），
+# 原来每条命令都全量扫一遍 32 个 = 4.9ms。设 0 即恢复「每条都扫」。
+# 调大会让已完成的 case 短时间内仍占着槽位，所以 reserve_slot 判满时会强制精确复核一次。
+MODEL_DAEMON_SCAN_INTERVAL_SECONDS = float(
+    os.getenv("MODEL_DAEMON_SCAN_INTERVAL_SECONDS", "0.2")
+)
 MODEL_SERVICE_POLL_INTERVAL = 1
 MODEL_SERVICE_DEFAULT_TIMEOUT = 600
 
