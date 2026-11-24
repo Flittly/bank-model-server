@@ -297,7 +297,7 @@ class ModelCaseReference:
         directory = os.path.join(config.DIR_MODEL_CASE, case_id, "status")
         if not os.path.isdir(directory):
             return None
-        filenames = util.get_filenames(directory)
+        filenames = util.get_filenames(directory, missing_ok=True)
         if not filenames:
             return None
         with open(os.path.join(directory, filenames[0]), "r", encoding="utf-8") as file:
@@ -412,37 +412,68 @@ class ModelCaseReference:
         if mcr is not None:
             mcr.update_status(status, content, mode)
 
+    def _has_complete_layout(self) -> bool:
+        """identity.json 与 status/ 里至少一个状态文件都在，才算「已初始化」。"""
+        if not os.path.exists(os.path.join(self.directory, "identity.json")):
+            return False
+        return bool(
+            util.get_filenames(
+                os.path.join(self.directory, "status"), missing_ok=True
+            )
+        )
+
     def initialize(self) -> None:
-        if os.path.exists(self.directory):
+        # 判据必须是「三样产出都在」，不能是「目录存在」。
+        # 删 case 时只要有一个文件删不掉（Windows 上子进程还占着 child.log 就
+        # 删不掉，shutil.rmtree(ignore_errors=True) 会跳过它继续删别的），目录就
+        # 仍然「存在」，但里面只剩一个残文件，成了空壳。旧代码这时直接 return，
+        # identity.json 和 status/ 永远补不上；run() 紧接着问状态，
+        # get_status() 读 status/ 抛 FileNotFoundError ⇒ HTTP 500。
+        # 而 case id 是 md5(url+json) ⇒ 同一断面每次重试都落回同一个空壳，
+        # 永久失败，重启服务也不会自愈。实测样本：
+        # case/f052d3b325823bffc507235742b640ef（目录里只剩 child.log）。
+        if self._has_complete_layout():
             return
 
         os.makedirs(self.directory, exist_ok=True)
         with ModelCaseReference._case_lock(self.local_file_locker):
             os.makedirs(os.path.join(self.directory, "time"), exist_ok=True)
             os.makedirs(os.path.join(self.directory, "result"), exist_ok=True)
-            os.makedirs(os.path.join(self.directory, "status"), exist_ok=True)
+            status_directory = os.path.join(self.directory, "status")
+            os.makedirs(status_directory, exist_ok=True)
 
-            with open(
-                os.path.join(self.directory, "identity.json"), "w", encoding="utf-8"
-            ) as file:
-                json.dump(
-                    {
-                        "model": self.model_name,
-                        "model-path": self.model_path,
-                        "url": self.request_url,
-                        "json": self.request_json,
-                        "dependencies": self.dependencies,
-                    },
-                    file,
-                    indent=4,
-                )
+            identity_path = os.path.join(self.directory, "identity.json")
+            # 只补缺失的 identity.json，绝不覆盖已有的：case id 只由 url+json
+            # 决定，dependencies 不在 id 里，覆盖会改掉已完成 case 的依赖关系。
+            if not os.path.exists(identity_path):
+                with open(identity_path, "w", encoding="utf-8") as file:
+                    json.dump(
+                        {
+                            "model": self.model_name,
+                            "model-path": self.model_path,
+                            "url": self.request_url,
+                            "json": self.request_json,
+                            "dependencies": self.dependencies,
+                        },
+                        file,
+                        indent=4,
+                    )
 
-            with open(
-                os.path.join(self.directory, "status", str(config.STATUS_UNLOCK)),
-                "w",
-                encoding="utf-8",
-            ) as file:
-                file.write("OK")
+            # 状态判据必须在锁内复核：update_status 是「删旧 + 建新」两步，
+            # 锁外那一瞬间 status/ 可能是空的，误判成新 case 会把进度打回 pending。
+            is_new = not util.get_filenames(status_directory, missing_ok=True)
+            if is_new:
+                with open(
+                    os.path.join(status_directory, str(config.STATUS_UNLOCK)),
+                    "w",
+                    encoding="utf-8",
+                ) as file:
+                    file.write("OK")
+
+        if not is_new:
+            # 这是已有的 case：只补齐了目录结构，不能重置响应/阶段/时间戳，
+            # 否则会把 COMPLETE 的缓存打回 pending，下次又重算一遍。
+            return
 
         self.make_response({})
         self.set_runtime(
@@ -466,19 +497,33 @@ class ModelCaseReference:
         self.timestamp = current_timestamp
 
     def get_status(self) -> int:
+        # missing_ok：status/ 可能被外部清理删掉，也可能正处在 update_status
+        # 的「删旧→建新」之间。读不到状态就是「没有状态」，不能抛
+        # FileNotFoundError —— 那会把 GET /v0/mc/status 变成 500，而这里的
+        # 每一个调用方（find_status / is_used / is_case_done）本来就把
+        # STATUS_NONE 当作正常返回值处理。
         status_directory = os.path.join(self.directory, "status")
-        filenames = util.get_filenames(status_directory)
+        filenames = util.get_filenames(status_directory, missing_ok=True)
         if not filenames:
             return config.STATUS_NONE
-        return int(filenames[0])
+        try:
+            return int(filenames[0])
+        except ValueError:
+            return config.STATUS_NONE
 
     def update_status(self, status: int, content: Any = None, mode: str = "a") -> None:
         # status/ 是「删旧文件 + 建新文件」两步，不是原子换名：不互斥就会出现
         # 两个文件名同时存在（读者按 filenames[0] 取，可能取到旧的那个）。
         with ModelCaseReference._case_lock(self.local_file_locker):
             status_directory = os.path.join(self.directory, "status")
-            filenames = util.get_filenames(status_directory)
-            current_status = int(filenames[0]) if filenames else config.STATUS_NONE
+            # 目录被外部清理删掉时自愈：否则下面的 open(..., "w") 会抛
+            # FileNotFoundError，把一次正常的状态流转变成 case 失败。
+            os.makedirs(status_directory, exist_ok=True)
+            filenames = util.get_filenames(status_directory, missing_ok=True)
+            try:
+                current_status = int(filenames[0]) if filenames else config.STATUS_NONE
+            except ValueError:
+                current_status = config.STATUS_NONE
 
             if current_status != status:
                 if filenames:

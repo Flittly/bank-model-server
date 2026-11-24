@@ -3,16 +3,25 @@ import config
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
     
-def get_filenames(path, ignore=[]):
-    
+def get_filenames(path, ignore=[], missing_ok=False):
+    """列出目录下的文件名。
+
+    missing_ok=False 保持历史行为（目录不存在就抛 FileNotFoundError）；
+    missing_ok=True 时返回空列表。读 case/<id>/status、case/<id>/time 这类
+    「目录本身可能被外部清理删掉」的路径必须用后者：抛异常会让整个 HTTP
+    请求变成 500，而「目录里没有文件」在语义上就是「没有状态」。
+    """
+
     if path is None:
         return []
 
     if not os.path.exists(path):
+        if missing_ok:
+            return []
         raise FileNotFoundError(f"The file {path} does not exist")
-    
+
     files = os.listdir(path)
-    
+
     return [f for f in files if os.path.isfile(os.path.join(path, f)) and (f not in ignore)]
 
 def get_directories(path, ignore=[]):
