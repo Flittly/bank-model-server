@@ -1,3 +1,4 @@
+import contextlib
 import datetime
 import json
 import os
@@ -5,7 +6,7 @@ import shutil
 import threading
 import time
 import traceback
-from typing import Any
+from typing import Any, Iterator, TextIO
 
 import portalocker
 
@@ -14,6 +15,46 @@ import util
 
 
 class ModelCaseReference:
+    @staticmethod
+    def _acquire_lock(lock_file: TextIO) -> None:
+        """毫秒级轮询地抢排他锁，替代 portalocker.lock(fh, LOCK_EX)。
+
+        为什么不能用 portalocker.lock(fh, LOCK_EX)：它在 Windows 上落到
+        msvcrt.LK_LOCK，抢不到锁时不是「立刻再试一次」，而是睡满 1 秒再试。
+        写方持锁只有 13~17.5ms，抢锁方却要等 1008ms（隔离实测：对方持锁 50ms，
+        LK_LOCK 等 1008ms，LK_NBLCK+1ms 等 71~80ms）。这就是 /v0/mc/status
+        发现延迟 890ms、daemon 派发排队 1014~1046ms 的共同根因。
+
+        语义与改造前一致：排他、一直等到拿到锁（上限由
+        MODEL_FILE_LOCK_WAIT_LIMIT_SECONDS 控制，默认 30s，0=不限），只把等待
+        粒度从 1000ms 换成 MODEL_FILE_LOCK_RETRY_SECONDS。互斥性不变——这里依然
+        是排他锁，只是换了个「怎么问」的方式；msvcrt 锁不重入，同一进程嵌套
+        加锁会一直等到上限后抛错。
+        """
+        limit = config.MODEL_FILE_LOCK_WAIT_LIMIT_SECONDS
+        deadline = time.perf_counter() + limit if limit > 0 else None
+        while True:
+            try:
+                portalocker.lock(lock_file, portalocker.LOCK_EX | portalocker.LOCK_NB)
+                return
+            except portalocker.exceptions.AlreadyLocked:
+                # 只有「别人正持有」才重试。其余 LockException（fd 非法、段超长）
+                # 是硬错误，重试没有意义，直接抛。
+                if deadline is not None and time.perf_counter() >= deadline:
+                    raise
+                time.sleep(config.MODEL_FILE_LOCK_RETRY_SECONDS)
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _case_lock(path: str) -> Iterator[TextIO]:
+        """进入即持锁、退出必解锁，避免各调用点自己写 lock/unlock 漏配对。"""
+        with open(path, "a+", encoding="utf-8") as lock_file:
+            ModelCaseReference._acquire_lock(lock_file)
+            try:
+                yield lock_file
+            finally:
+                portalocker.unlock(lock_file)
+
     @staticmethod
     def _extract_runtime_error(runtime: dict[str, Any] | None) -> str | None:
         if not isinstance(runtime, dict):
@@ -180,10 +221,9 @@ class ModelCaseReference:
         self.local_file_locker = os.path.join(self.directory, "lock")
         self.timestamp = 0
 
-        with open(config.DIR_GLOBALE_FILE_LOCKER, "a+", encoding="utf-8") as lock_file:
-            portalocker.lock(lock_file, portalocker.LOCK_EX)
+        # 建 case 要串行：同一份入参的 md5 相同，两个请求同时建会互相踩目录。
+        with ModelCaseReference._case_lock(config.DIR_GLOBALE_FILE_LOCKER):
             self.initialize()
-            portalocker.unlock(lock_file)
 
     @staticmethod
     def create(
@@ -377,8 +417,7 @@ class ModelCaseReference:
             return
 
         os.makedirs(self.directory, exist_ok=True)
-        with open(self.local_file_locker, "a+", encoding="utf-8") as lock_file:
-            portalocker.lock(lock_file, portalocker.LOCK_EX)
+        with ModelCaseReference._case_lock(self.local_file_locker):
             os.makedirs(os.path.join(self.directory, "time"), exist_ok=True)
             os.makedirs(os.path.join(self.directory, "result"), exist_ok=True)
             os.makedirs(os.path.join(self.directory, "status"), exist_ok=True)
@@ -404,7 +443,6 @@ class ModelCaseReference:
                 encoding="utf-8",
             ) as file:
                 file.write("OK")
-            portalocker.unlock(lock_file)
 
         self.make_response({})
         self.set_runtime(
@@ -435,8 +473,9 @@ class ModelCaseReference:
         return int(filenames[0])
 
     def update_status(self, status: int, content: Any = None, mode: str = "a") -> None:
-        with open(self.local_file_locker, "a+", encoding="utf-8") as lock_file:
-            portalocker.lock(lock_file, portalocker.LOCK_EX)
+        # status/ 是「删旧文件 + 建新文件」两步，不是原子换名：不互斥就会出现
+        # 两个文件名同时存在（读者按 filenames[0] 取，可能取到旧的那个）。
+        with ModelCaseReference._case_lock(self.local_file_locker):
             status_directory = os.path.join(self.directory, "status")
             filenames = util.get_filenames(status_directory)
             current_status = int(filenames[0]) if filenames else config.STATUS_NONE
@@ -458,7 +497,6 @@ class ModelCaseReference:
                     file.write(f"{content}\n")
 
             self.update_call_time()
-            portalocker.unlock(lock_file)
 
     def set_runtime(
         self,
@@ -469,9 +507,8 @@ class ModelCaseReference:
         meta: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         runtime_path = os.path.join(self.directory, "runtime.json")
-        with open(self.local_file_locker, "a+", encoding="utf-8") as lock_file:
-            portalocker.lock(lock_file, portalocker.LOCK_EX)
-
+        # 这里必须持锁：read-modify-write，两个写方并发会互相丢 timeline 条目。
+        with ModelCaseReference._case_lock(self.local_file_locker):
             loaded = ModelCaseReference._read_json_file(
                 runtime_path, default={}, tolerate_invalid=True
             )
@@ -519,7 +556,6 @@ class ModelCaseReference:
             # 一次 fsync 实测 1.34ms，而它掉电丢了只是「下一次轮询少看到一个中间态」。
             # 真正不能丢的产出（response.json）走 make_response，仍是 durable=True。
             ModelCaseReference._write_json_atomic(runtime_path, current, durable=False)
-            portalocker.unlock(lock_file)
 
         return current
 
@@ -571,30 +607,26 @@ class ModelCaseReference:
         self, content: dict[str, Any] | None = None
     ) -> dict[str, Any] | None:
         response_path = os.path.join(self.directory, "response.json")
-        with open(self.local_file_locker, "a+", encoding="utf-8") as lock_file:
-            portalocker.lock(lock_file, portalocker.LOCK_EX)
-            try:
-                if content is None:
-                    response = ModelCaseReference._read_json_file(
-                        response_path, default=None, tolerate_invalid=True
-                    )
-                    return response if isinstance(response, dict) else None
-
-                current_response = {}
-                loaded = ModelCaseReference._read_json_file(
-                    response_path, default={}, tolerate_invalid=True
+        with ModelCaseReference._case_lock(self.local_file_locker):
+            if content is None:
+                response = ModelCaseReference._read_json_file(
+                    response_path, default=None, tolerate_invalid=True
                 )
-                if isinstance(loaded, dict):
-                    current_response = loaded
+                return response if isinstance(response, dict) else None
 
-                current_response.update(content)
-                current_response["case-id"] = self.id
-                current_response["model"] = self.model_name
+            current_response = {}
+            loaded = ModelCaseReference._read_json_file(
+                response_path, default={}, tolerate_invalid=True
+            )
+            if isinstance(loaded, dict):
+                current_response = loaded
 
-                ModelCaseReference._write_json_atomic(response_path, current_response)
-                return current_response
-            finally:
-                portalocker.unlock(lock_file)
+            current_response.update(content)
+            current_response["case-id"] = self.id
+            current_response["model"] = self.model_name
+
+            ModelCaseReference._write_json_atomic(response_path, current_response)
+            return current_response
 
     def result_packaging(self) -> str:
         result_directory = os.path.join(self.directory, "result")

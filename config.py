@@ -238,6 +238,22 @@ MODEL_CASE_CHILD_TIMEOUT_SECONDS = int(
     os.getenv("MODEL_CASE_CHILD_TIMEOUT_SECONDS", "0")
 )
 
+# ---- Case 锁的等待粒度（不是锁本身要不要） --------------------------------
+# portalocker.lock(fh, LOCK_EX) 在 Windows 上落到 msvcrt.LK_LOCK，这个模式抢不到
+# 锁不是「再试一次」而是睡满 1 秒再试（msvcrt 的固定重试周期）。写方持锁只有十几
+# 毫秒，抢锁方却要等 1008ms：/v0/mc/status 发现延迟 890ms、daemon 派发排队
+# 1014~1046ms，全是这一个原因。所以模型端统一改成 LK_NBLCK + 下面的毫秒轮询。
+#   MODEL_FILE_LOCK_RETRY_SECONDS       非阻塞抢锁失败后的重试间隔
+#   MODEL_FILE_LOCK_WAIT_LIMIT_SECONDS  等锁上限（秒），0 = 一直等。
+#       默认 30s：健康状态下抢锁只等对方那十几毫秒，30s 触不到；真触到了说明
+#       有句柄泄漏或有嵌套加锁（msvcrt 同进程不重入），抛错比无限空转更好定位。
+MODEL_FILE_LOCK_RETRY_SECONDS = float(
+    os.getenv("MODEL_FILE_LOCK_RETRY_SECONDS", "0.001")
+)
+MODEL_FILE_LOCK_WAIT_LIMIT_SECONDS = float(
+    os.getenv("MODEL_FILE_LOCK_WAIT_LIMIT_SECONDS", "30")
+)
+
 # Kafka 配置
 KAFKA_ENABLED = _env_flag("KAFKA_ENABLED", False)
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092").split(
