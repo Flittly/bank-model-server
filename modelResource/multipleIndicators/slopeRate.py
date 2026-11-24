@@ -82,6 +82,8 @@ if __name__ == '__main__':
     v1 = sys.argv[1]    
     v2 = sys.argv[2]    
     
+    model.require_cases([v1, v2], NAME)
+
     section_view_mcr = model.ModelCaseReference.open_case(v1)
     slope_rate_mcr = model.ModelCaseReference.open_case(v2)
     

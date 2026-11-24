@@ -87,6 +87,8 @@ if __name__ == '__main__':
 
     v1 = sys.argv[1]    # slope protection model case reference id
 
+    model.require_cases([v1], NAME)
+
     mcr = model.ModelCaseReference.open_case(v1)
 
     # Run model case (Slope Protection)

@@ -109,6 +109,8 @@ if __name__ == '__main__':
     
     v1 = sys.argv[1]    # erosion model case reference id
     
+    model.require_cases([v1], NAME)
+
     mcr = model.ModelCaseReference.open_case(v1)
 
     # if (not config.APP_DEBUG) and mcr.request_json['dem-id'] != "NONE":

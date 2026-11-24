@@ -172,6 +172,8 @@ def RESPONSING(
 if __name__ == "__main__":
     v1 = sys.argv[1]  # flow_field_velocity_mcr
 
+    model.require_cases([v1], NAME)
+
     flow_field_velocity_mcr = model.ModelCaseReference.open_case(v1)
 
     if not "sample-points" in flow_field_velocity_mcr.request_json:

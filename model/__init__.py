@@ -4,6 +4,7 @@ import subprocess
 import config
 
 from .hydrodynamic_resource import generate_hydrodynamic_resource
+from .caseEntry import EXIT_CASE_UNAVAILABLE, require_cases
 from .modelCaseReference import ModelCaseReference
 from .modelLauncher import ModelLauncher as launcher
 from .modelLauncher import model_status_controller_sync

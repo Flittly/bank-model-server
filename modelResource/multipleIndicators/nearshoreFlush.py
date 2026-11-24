@@ -146,6 +146,8 @@ if __name__ == "__main__":
     v2 = sys.argv[2]  # section view model case id
     v3 = sys.argv[3]  # nearshore flush model case id
 
+    model.require_cases([v1, v2, v3], NAME)
+
     global_mcr = model.ModelCaseReference.open_case(v1)
     section_view_mcr = model.ModelCaseReference.open_case(v2)
     nearshore_flush_mcr = model.ModelCaseReference.open_case(v3)

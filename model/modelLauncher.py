@@ -10,6 +10,7 @@ import functools
 import py_compile
 from typing import cast
 from .modelProcess import Process_Queue
+from .caseEntry import EXIT_CASE_UNAVAILABLE
 from .modelCaseReference import ModelCaseReference as MCR
 from .modelRecovery import reset_error_for_retry, try_recover_stale_lock
 
@@ -19,6 +20,19 @@ from .modelRecovery import reset_error_for_retry, try_recover_stale_lock
 def model_status_controller_sync(func):
     @functools.wraps(func)
     def wrapper(mcr: MCR, *args, **kwargs):
+        # 防御：正常路径上 ``__main__`` 已经用 caseEntry.require_cases 校验过入参，
+        # 但这里必须再拦一次。mcr 为 None 时下面的 find_status 会抛 AttributeError，
+        # 而它**在 try 之外**——子进程只会留下「'NoneType' object has no attribute
+        # 'find_status'」，既无法写状态（没有 case 可写），也看不出是哪个 case 没了。
+        # 用同一个退出码退出，父进程的监控线程据此把原因写成「输入 case 不可用」。
+        if mcr is None:
+            print(
+                f"[model-runner][fatal] {func.__name__} received mcr=None: "
+                "the input case is unavailable (deleted or uninitialized)",
+                flush=True,
+            )
+            raise SystemExit(EXIT_CASE_UNAVAILABLE)
+
         # Return if mcr is unlocked (COMPLETE or ERROR)
         if mcr.find_status(config.STATUS_COMPLETE) or mcr.find_status(
             config.STATUS_ERROR

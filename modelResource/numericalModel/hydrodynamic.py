@@ -189,6 +189,8 @@ def RESPONSING(
 if __name__ == "__main__":
     v1 = sys.argv[1]  # hydrodynamic model case id
 
+    model.require_cases([v1], NAME)
+
     hydrodynamic_mcr = model.ModelCaseReference.open_case(v1)
 
     # Run model case (Hydrodynamic)

@@ -1074,6 +1074,8 @@ def RESPONSING(
 if __name__ == "__main__":
     v1 = sys.argv[-1]  # model case id
 
+    model.require_cases([v1], NAME)
+
     section_view_mcr = model.ModelCaseReference.open_case(v1)
 
     # Run section view model case

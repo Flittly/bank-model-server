@@ -203,6 +203,8 @@ if __name__ == '__main__':
 
     v1 = sys.argv[1]    # flow equivalent model case reference id
 
+    model.require_cases([v1], NAME)
+
     mcr = model.ModelCaseReference.open_case(v1)
 
     # Run model case (Flow Equivalent)

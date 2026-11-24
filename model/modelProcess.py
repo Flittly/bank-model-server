@@ -9,9 +9,12 @@ import subprocess
 import multiprocessing
 
 from .modelCaseReference import ModelCaseReference as MCR
+from .caseEntry import EXIT_CASE_UNAVAILABLE
 from .modelRecovery import (
+    case_idle_seconds,
     remove_heartbeat,
     touch_heartbeat,
+    try_recover_stale_lock,
 )
 
 # 子进程的 stdout/stderr 合并写进这个文件。崩溃的现场（ImportError / GDAL 报错 /
@@ -23,6 +26,42 @@ CHILD_LOG_TAIL_CHARS = 1200
 CHILD_LOG_MAX_BYTES = 2 * 1024 * 1024  # 只保留一代 .1 备份，避免无限膨胀
 
 TERMINAL_STATUS = config.STATUS_COMPLETE | config.STATUS_ERROR
+
+
+def mark_pending_stage(
+    mcr: MCR | None,
+    stage: str,
+    progress: int,
+    message: str,
+    meta: dict | None = None,
+) -> None:
+    """把 case 落到「等槽位 / 等依赖」这类 pending 阶段，重复调用不重复写盘。
+
+    daemon 每轮空转都会为同一条排队命令重走一次
+    ``execute_`` → ``try_to_run_case``（槽位满）或 ``ready_for_core_case``
+    （依赖没完），而 ``set_runtime`` 每次都要 读-改-写 runtime.json 再原子换名。
+    实测这条忙等路径每 ~6ms 写一次、160ms 就把 24 条 timeline 上限写满：
+    进度没有任何变化，盘却被刷穿。
+
+    只有「阶段/状态/meta 都一致」时才跳过；依赖 id 变了、或从 running 退回
+    pending，都会照常写一条。
+    """
+    if mcr is None:
+        return
+    current = MCR.get_runtime_info(mcr.id) or {}
+    if (
+        current.get("stage") == stage
+        and current.get("status") == "pending"
+        and current.get("meta") == meta
+    ):
+        return
+    mcr.set_runtime(
+        stage=stage,
+        progress=progress,
+        message=message,
+        status="pending",
+        meta=meta,
+    )
 
 
 def get_child_log_path(case_id: str) -> str:
@@ -63,6 +102,13 @@ def mark_case_failure(case_id: str, reason: str, meta: dict | None = None) -> bo
     """
     mcr = MCR.open_case(case_id)
     if mcr is None:
+        # case 在排队期间被删（或只剩空壳）：这里没有落笔的地方，只能把话说清楚。
+        # 调用方轮询 /v0/mc/status 会拿到 not_found，不会永远 pending。
+        print(
+            f"[model-runner][error] cannot record failure case={case_id}: "
+            "case directory or identity.json is gone (deleted while queued?)",
+            flush=True,
+        )
         return False
     if mcr.get_status() & TERMINAL_STATUS:
         return False  # 已经完成或已经报过错，别覆盖真实结果
@@ -136,7 +182,14 @@ def monitor_case_subprocess(
             time.sleep(config.MODEL_CASE_MONITOR_INTERVAL_SECONDS)
 
         if reason is None:
-            if return_code != 0:
+            if return_code == EXIT_CASE_UNAVAILABLE:
+                # 子进程入口校验没过：入参 case 在排队期间被删/成了空壳。
+                # 这是环境问题（可重跑），不是模型代码问题，所以照样标 infra-error。
+                reason = (
+                    "Model input case was unavailable when the subprocess started "
+                    "(deleted or never initialized while queued)"
+                )
+            elif return_code != 0:
                 reason = f"Model subprocess exited with code {return_code}"
             else:
                 mcr = MCR.open_case(case_id)
@@ -297,6 +350,34 @@ def daemon_process(process_queue: queue.Queue[any]):
         with task_queue_lock:
             task_queue.discard(case_id)
 
+    # 同一 case 的「重复提交被忽略」痕迹限流：重复提交可能很密（前端重试），
+    # 每写一条 event 都是一次追加写盘。
+    duplicate_notice_at: dict[str, float] = {}
+
+    def notice_duplicate(case_id: str, mcr: MCR | None) -> None:
+        now = time.monotonic()
+        if now - duplicate_notice_at.get(case_id, 0.0) < 60.0:
+            return
+        duplicate_notice_at[case_id] = now
+        idle = case_idle_seconds(case_id)
+        idle_text = "unknown" if idle is None else f"{idle:.0f}s"
+        print(
+            f"[model-runner] duplicate command ignored case={case_id} "
+            f"(already dispatched, idle={idle_text})",
+            flush=True,
+        )
+        if mcr is None:
+            return
+        try:
+            mcr.append_event(
+                "warning",
+                "Duplicate submission ignored: this case is already dispatched",
+                stage="duplicate_ignored",
+                meta={"idle-seconds": None if idle is None else round(idle, 1)},
+            )
+        except OSError:
+            pass
+
     def try_to_run_case(command):
         id = command[-1]
         update_task_queue()
@@ -307,6 +388,33 @@ def daemon_process(process_queue: queue.Queue[any]):
             # 节流窗口内残留的已结束 case 会造成假「满」，精确复核一次再判。
             update_task_queue(force=True)
             slot = reserve_slot(id)
+
+        if slot == "duplicate":
+            # duplicate 有两个来源，必须先分开，不能一起当成「满」：
+            # ① 槽位里那个 id 其实已经跑完了，只是节流窗口内还没被清掉；
+            # ② 真的还有一个子进程在跑（同一参数重复提交，md5 相同的 case）。
+            update_task_queue(force=True)
+            slot = reserve_slot(id)
+
+        if slot == "duplicate":
+            # ②里还要再分一次：持有槽位的子进程可能早就死了，case 停在 LOCK、
+            # 心跳也停了。这时槽位是僵尸占位，而旧代码在这个分支既不 force 复核
+            # 也不重新入队 ⇒ 命令被静默丢弃，case 永远停在 waiting_slot + status=2。
+            # try_recover_stale_lock 只接管「只有 LOCK、没有 RUNNING」且心跳过期的，
+            # 真在算的一律不动。
+            if try_recover_stale_lock(mcr):
+                print(
+                    f"[model-runner] reclaimed stale slot case={id}, re-dispatching",
+                    flush=True,
+                )
+                release_slot(id)
+                slot = reserve_slot(id)
+            else:
+                # 真的在跑：这次提交已经被满足了（调用方轮询能看到终态），命令要
+                # 消费掉，不能再进 deferred_queue 空转。也绝不能写 waiting_slot——
+                # 那会把正在跑的 case 的进度条打回 pending。
+                notice_duplicate(id, mcr)
+                return True
 
         if slot == "ok":
             if mcr is not None:
@@ -326,13 +434,12 @@ def daemon_process(process_queue: queue.Queue[any]):
                 release_slot(id)
             return True
 
-        if mcr is not None:
-            mcr.set_runtime(
-                stage="waiting_slot",
-                progress=10,
-                message="Waiting for an available execution slot",
-                status="pending",
-            )
+        mark_pending_stage(
+            mcr,
+            "waiting_slot",
+            10,
+            "Waiting for an available execution slot",
+        )
         return False
 
     # Return 0: False, 1: True, 2: Error
@@ -377,14 +484,15 @@ def daemon_process(process_queue: queue.Queue[any]):
 
             if (current_status & config.STATUS_COMPLETE) != config.STATUS_COMPLETE:
                 core_mcr = MCR.open_case(core_mcr_id)
-                if core_mcr is not None:
-                    core_mcr.set_runtime(
-                        stage="waiting_dependencies",
-                        progress=10,
-                        message="Waiting for dependent cases to complete",
-                        status="pending",
-                        meta={"dependency-case-id": id},
-                    )
+                # 依赖没跑完时命令会一直留在 deferred_queue，每轮回灌都会走到这里。
+                # 用 mark_pending_stage 去重，否则同一条命令每轮都重写一次 runtime.json。
+                mark_pending_stage(
+                    core_mcr,
+                    "waiting_dependencies",
+                    10,
+                    "Waiting for dependent cases to complete",
+                    meta={"dependency-case-id": id},
+                )
                 is_ready = 0
                 break
 

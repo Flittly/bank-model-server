@@ -9,7 +9,12 @@ if module_path not in sys.path:
     sys.path.append(module_path)
     
 import config
-from model import ModelCaseReference as MCR, model_status_controller_sync, generate_hydrodynamic_resource
+from model import (
+    ModelCaseReference as MCR,
+    generate_hydrodynamic_resource,
+    model_status_controller_sync,
+    require_cases,
+)
 
 def chomd_x(file_path):
     
@@ -120,6 +125,8 @@ if __name__ == '__main__':
     
     v1 = sys.argv[1]
     
+    require_cases([v1], NAME)
+
     real_hydro_mcr = MCR.open_case(v1)
     
     run_real_hydrodynamic_mcr(real_hydro_mcr)

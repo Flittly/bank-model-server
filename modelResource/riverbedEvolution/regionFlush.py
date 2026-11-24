@@ -814,6 +814,8 @@ if __name__ == "__main__":
     v1 = sys.argv[1]  # global model case reference id
     v2 = sys.argv[2] if len(sys.argv) == 3 else None  # region model case reference id
 
+    model.require_cases([v1] + ([v2] if v2 else []), NAME)
+
     global_mcr = MCR.open_case(v1)
 
     if v2 is None:

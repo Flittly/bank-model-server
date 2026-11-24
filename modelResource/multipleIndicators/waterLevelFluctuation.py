@@ -304,6 +304,8 @@ if __name__ == "__main__":
     v2 = sys.argv[2]
     v3 = sys.argv[3]
 
+    model.require_cases([v1, v2, v3], NAME)
+
     # Open model case
     section_view_mcr = model.ModelCaseReference.open_case(v1)
     hydrodynamic_mcr = model.ModelCaseReference.open_case(v2)

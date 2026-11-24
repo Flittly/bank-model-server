@@ -400,6 +400,8 @@ if __name__ == "__main__":
     v1 = sys.argv[1]  # global model case reference id
     v2 = sys.argv[2]  # region model case reference id
 
+    model.require_cases([v1, v2], NAME)
+
     global_mcr = model.ModelCaseReference.open_case(v1)
     region_mcr = model.ModelCaseReference.open_case(v2)
 

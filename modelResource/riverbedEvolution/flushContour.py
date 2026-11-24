@@ -219,6 +219,8 @@ if __name__ == '__main__':
     v2 = sys.argv[2]    # global contour model case reference id
     v3 = sys.argv[3] if len(sys.argv) == 4 else None    # region contour model case reference id
     
+    model.require_cases([v1, v2] + ([v3] if v3 else []), NAME)
+
     global_flush_mcr = model.ModelCaseReference.open_case(v1)
     global_contour_mcr = model.ModelCaseReference.open_case(v2)
     

@@ -625,6 +625,8 @@ if __name__ == "__main__":
     v9 = sys.argv[9]
     v10 = sys.argv[10]
 
+    model.require_cases([v1, v2, v3, v4, v5, v6, v7, v8, v9, v10], NAME)
+
     soil_composition_mcr = model.ModelCaseReference.open_case(v1)
     slope_protection_mcr = model.ModelCaseReference.open_case(v2)
     load_control_mcr = model.ModelCaseReference.open_case(v3)
