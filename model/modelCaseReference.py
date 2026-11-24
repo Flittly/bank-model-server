@@ -93,21 +93,31 @@ class ModelCaseReference:
         return " | ".join(summaries)
 
     @staticmethod
-    def _case_lock_path(case_id: str) -> str:
-        return os.path.join(config.DIR_MODEL_CASE, case_id, "lock")
-
-    @staticmethod
     def _read_json_file(
-        path: str, default: Any = None, tolerate_invalid: bool = False
+        path: str,
+        default: Any = None,
+        tolerate_invalid: bool = False,
+        retries: int = 0,
     ) -> Any:
-        if not os.path.exists(path):
-            return default
+        """读 JSON。retries > 0 时只吸收「换名瞬间的共享冲突」，不改其它语义。
 
-        try:
-            with open(path, "r", encoding="utf-8") as file:
-                content = file.read().strip()
-        except OSError:
-            return default
+        runtime.json / response.json 的写入恒走 _write_json_atomic（os.replace
+        原子换名），读者读到的永远是某个完整版本，因此调用方可以不加文件锁。
+        但换名那一瞬间读方 open() 会撞上 Windows 共享冲突（实测约 1.3%），
+        这是瞬时窗口，退让 0.5ms 重读即可；重试耗尽后仍返回 default。
+        """
+        content: str | None = None
+        for attempt in range(retries + 1):
+            if not os.path.exists(path):
+                return default
+            try:
+                with open(path, "r", encoding="utf-8") as file:
+                    content = file.read().strip()
+                break
+            except OSError:
+                if attempt >= retries:
+                    return default
+                time.sleep(0.0005)
 
         if not content:
             return default
@@ -141,29 +151,6 @@ class ModelCaseReference:
 
         if last_error is not None:
             raise last_error
-
-    @staticmethod
-    def _read_case_json_with_lock(
-        case_id: str,
-        filename: str,
-        default: Any = None,
-        tolerate_invalid: bool = False,
-    ) -> Any:
-        path = os.path.join(config.DIR_MODEL_CASE, case_id, filename)
-        lock_path = ModelCaseReference._case_lock_path(case_id)
-        if not os.path.exists(lock_path):
-            return ModelCaseReference._read_json_file(
-                path, default=default, tolerate_invalid=tolerate_invalid
-            )
-
-        with open(lock_path, "a+", encoding="utf-8") as lock_file:
-            portalocker.lock(lock_file, portalocker.LOCK_EX)
-            try:
-                return ModelCaseReference._read_json_file(
-                    path, default=default, tolerate_invalid=tolerate_invalid
-                )
-            finally:
-                portalocker.unlock(lock_file)
 
     def __init__(
         self,
@@ -249,8 +236,12 @@ class ModelCaseReference:
 
     @staticmethod
     def get_case_response(case_id: str) -> dict[str, Any] | None:
-        response = ModelCaseReference._read_case_json_with_lock(
-            case_id, "response.json", default=None, tolerate_invalid=True
+        # 无锁读：response.json 的写入恒走 _write_json_atomic（原子换名），
+        # 读者只会拿到完整版本，见 _read_json_file 的说明。
+        # ⚠ 任何新增的写入方都必须继续用 _write_json_atomic，否则读方要恢复加锁。
+        path = os.path.join(config.DIR_MODEL_CASE, case_id, "response.json")
+        response = ModelCaseReference._read_json_file(
+            path, default=None, tolerate_invalid=True, retries=3
         )
         return response if isinstance(response, dict) else None
 
@@ -267,8 +258,14 @@ class ModelCaseReference:
 
     @staticmethod
     def get_runtime_info(case_id: str) -> dict[str, Any] | None:
-        runtime = ModelCaseReference._read_case_json_with_lock(
-            case_id, "runtime.json", default=None, tolerate_invalid=True
+        # 无锁读。这里原先抢 case/<id>/lock 的 LOCK_EX，实测 GET /v0/mc/status
+        # 在这一段耗 1008.6ms（同一接口的 status/、events 两段都只有 0.3ms）：
+        # 写方持锁约 17.5ms，而 msvcrt 的唤醒粒度是 1 秒，撞上就等满一个周期。
+        # 读方不写 status/、time/，退出锁队列不影响写方之间的互斥。
+        # ⚠ 前提同上：runtime.json 的写入必须始终走 _write_json_atomic。
+        path = os.path.join(config.DIR_MODEL_CASE, case_id, "runtime.json")
+        runtime = ModelCaseReference._read_json_file(
+            path, default=None, tolerate_invalid=True, retries=3
         )
         return runtime if isinstance(runtime, dict) else None
 

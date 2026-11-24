@@ -307,7 +307,13 @@ def is_retryable_error(mcr: MCR) -> bool:
     if not (mcr.get_status() & config.STATUS_ERROR):
         return False
 
-    runtime = MCR.get_runtime_info(mcr.id) or {}
+    runtime = MCR.get_runtime_info(mcr.id)
+    if runtime is None:
+        # 读不到 runtime 就无从判断是环境问题还是代码问题。这里选「按可重跑处理」：
+        # 重跑一次只是多花一点算力，误判成「代码 bug」却会让这条断面永久失败
+        # （case id = md5(url+json)，ERROR 会被当终态缓存直返）。
+        return True
+
     meta = runtime.get("meta")
     if isinstance(meta, dict):
         if meta.get("infra-error") or "exit-code" in meta:
