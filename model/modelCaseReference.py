@@ -2,6 +2,7 @@ import datetime
 import json
 import os
 import shutil
+import threading
 import time
 import traceback
 from typing import Any
@@ -477,9 +478,30 @@ class ModelCaseReference:
                     "case-id": self.id,
                     "model": self.model_name,
                     "stage": stage,
-                    "updated-at": datetime.datetime.now().isoformat(timespec="seconds"),
+                    # 毫秒精度：Java 侧算「模型已完成到客户端发现」的延迟要读这个字段。
+                    # 唯一的消费方 modelRecovery._iso_age_seconds 用 fromisoformat，
+                    # 能解析带小数秒的形式，空闲判定不受影响。
+                    "updated-at": datetime.datetime.now().isoformat(
+                        timespec="milliseconds"
+                    ),
                 }
             )
+            if config.MODEL_PROFILE_TIMELINE:
+                # 唯一的时间线写入点。11 个指标脚本、daemon、请求线程全部经由
+                # set_runtime 报阶段，所以只改这一处就能覆盖全部阶段切换，
+                # 且不增加任何一次额外的文件读写。
+                timeline = current.get("timeline")
+                if not isinstance(timeline, list):
+                    timeline = []
+                timeline.append(
+                    {
+                        "stage": stage,
+                        "at-ns": time.time_ns(),
+                        "pid": os.getpid(),
+                        "thread": threading.current_thread().name,
+                    }
+                )
+                current["timeline"] = timeline[-config.MODEL_PROFILE_TIMELINE_MAX :]
             if progress is not None:
                 current["progress"] = progress
             if message is not None:

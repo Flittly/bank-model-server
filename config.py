@@ -192,6 +192,21 @@ MAX_RUNNING_MODEL_CASE_NUM = int(os.getenv("MAX_RUNNING_MODEL_CASE_NUM", "32"))
 MODEL_SERVICE_POLL_INTERVAL = 1
 MODEL_SERVICE_DEFAULT_TIMEOUT = 600
 
+# ---- 性能埋点（默认关闭） --------------------------------------------------
+# 开启后，set_runtime 会在 runtime.json 里维护一条 timeline：最近 N 次阶段切换的
+# 纳秒时间戳 + pid + 线程名。一条 case 由三个执行体接力写出（请求线程建 case、
+# daemon 派发、子进程计算），只有时间线才能把三段串到同一把尺子上。
+# 关闭时：不追加任何字段、不增加任何一次文件读写，runtime.json 与行为完全不变。
+# 用法：APP_MODEL_PROFILE=1 启动服务 → 跑任务 → .venv/Scripts/python.exe tools/case_profile.py
+MODEL_PROFILE_TIMELINE = os.getenv("APP_MODEL_PROFILE", "0") in (
+    "1",
+    "true",
+    "TRUE",
+    "yes",
+)
+# 只保留最后 N 条：retrying 会反复写，无限追加会让 runtime.json 无界增长。
+MODEL_PROFILE_TIMELINE_MAX = int(os.getenv("APP_MODEL_PROFILE_MAX", "24"))
+
 # ---- Case 锁的自愈参数 ----------------------------------------------------
 # LOCK 只表示「这个 case 被某个请求认领了」，它没有持有者记录、也没有租约，
 # 认领它的进程一死，锁就永远留在 status/2 上。/v0/mc/status 对它恒回 pending，
