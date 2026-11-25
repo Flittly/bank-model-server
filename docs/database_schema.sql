@@ -364,13 +364,32 @@ CREATE TABLE IF NOT EXISTS hydrodynamic_points (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_hydro_points_id ON hydrodynamic_points(point_id);
-CREATE INDEX IF NOT EXISTS idx_hydro_points_region ON hydrodynamic_points(dataset_domain);
-CREATE INDEX IF NOT EXISTS idx_hydro_points_set ON hydrodynamic_points(set_name);
+-- 水动力点的索引。
+-- 2026-11-25 清理（-104.7MB）：删掉 5 条冗余/无效索引
+--   idx_hydro_points_id      与 point_id 的 UNIQUE 索引完全重复（-73MB）
+--   idx_hydro_points_region  dataset_domain 全表单值（-8MB）
+--   idx_hydro_points_set     set_name 全表单值（-8MB）
+--   idx_hydro_points_temp    temp 全表单值，且新联合索引已是 partial WHERE temp = FALSE（-8MB）
+--   idx_hydrodynamic_points_user_id  只写入不过滤（-8MB）
+-- 依据：这几列在全表只有 1 个取值，选择率 100%，优化器选中也等于全扫；
+-- 且代码里没有任何「只按单列过滤」的查询（都是 4 个条件一起 AND）。
 CREATE INDEX IF NOT EXISTS idx_hydro_points_water ON hydrodynamic_points(water_qs);
 CREATE INDEX IF NOT EXISTS idx_hydro_points_tidal ON hydrodynamic_points(tidal_level);
-CREATE INDEX IF NOT EXISTS idx_hydro_points_temp ON hydrodynamic_points(temp);
 CREATE INDEX IF NOT EXISTS idx_hydro_points_geom ON hydrodynamic_points USING GIST(geom);
+
+-- 「数据集 -> 可用节点」映射的联合索引（docs/model-db-p0-design.md 的 D1）。
+-- 上面那批单列索引里，dataset_domain / set_name / temp 三列全表几乎只有一个取值，
+-- 选择率 100%，组合不起来；优化器只能挑 tidal_level 用，剩下 3 个条件退化成回表
+-- Filter —— 命中 8 万行、回表 2 千余页，过滤后只剩 1 行。
+-- 这条把 4 个等值条件合进索引顺序，查询走 Index Only Scan（Heap Fetches: 0）：
+--   dc         : 2283 页 / 39ms  ->  76 页 / 6.5ms
+--   1998-2023  : 3126 页 / 103ms -> 109 页 / 9.2ms
+-- 索引 3.4MB。生产环境建索引请用 CREATE INDEX CONCURRENTLY（不能放在事务块里）。
+-- partial（WHERE temp = FALSE）是因为 get_available_hydrodynamic_nodes 恒带该条件；
+-- get_hydrodynamic_points 不带 temp，走不上这条索引（非热路径，有意为之）。
+CREATE INDEX IF NOT EXISTS idx_hydro_points_lookup
+    ON hydrodynamic_points(dataset_domain, set_name, tidal_level, water_qs)
+    WHERE temp = FALSE;
 
 CREATE OR REPLACE FUNCTION update_hydrodynamic_points_updated_at()
 RETURNS TRIGGER AS $$

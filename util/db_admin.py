@@ -72,8 +72,9 @@ END $$;
 ALTER TABLE hydrodynamic_points
 ADD COLUMN IF NOT EXISTS temp BOOLEAN DEFAULT FALSE NOT NULL;
 
-CREATE INDEX IF NOT EXISTS idx_hydro_points_temp
-ON hydrodynamic_points(temp);
+-- 曾在这里建 idx_hydro_points_temp(temp)。已删除：temp 全表只有一个取值（FALSE），
+-- 选择率 100%，且联合索引 idx_hydro_points_lookup 已是 partial WHERE temp = FALSE。
+-- 老库上残留的同名索引请手工 DROP INDEX CONCURRENTLY。
 
 -- 添加 section 验证字段
 ALTER TABLE cross_sections
