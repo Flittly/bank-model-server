@@ -16,6 +16,7 @@ from .modelRecovery import (
     touch_heartbeat,
     try_recover_stale_lock,
 )
+from util import hydro_node_index
 
 # 子进程的 stdout/stderr 合并写进这个文件。崩溃的现场（ImportError / GDAL 报错 /
 # Segmentation fault 之前的最后一行）只能从这里拿到——子进程如果在 import 阶段就死了，
@@ -294,8 +295,37 @@ def safe_launcher(command: list[str]) -> subprocess.Popen | None:
     return spawn_case_subprocess(command)
 
 
+def _start_hydro_node_index_refresher() -> None:
+    """起一个后台线程，定时刷新水动力节点字典（D2）。
+
+    挂在这里是因为 daemon 是全系统唯一「活得比 HTTP 请求久、也比 case 子进程久」
+    的常驻对象，也是唯一有资格替子进程查库的角色。刷新线程崩了不带走 daemon，
+    刷新失败只打日志 —— daemon 不能因为一次数据库抖动就死。
+    """
+    if not config.MODEL_HYDRO_NODE_INDEX_ENABLED:
+        print("[hydro-node-index] 开关关闭，case 将直接查库", flush=True)
+        return
+
+    def worker() -> None:
+        while True:
+            started = time.monotonic()
+            try:
+                hydro_node_index.refresh_now()
+            except Exception as error:  # noqa: BLE001 - 双保险，refresh_now 内部已兜底
+                print(f"[hydro-node-index] 刷新线程异常: {error}", flush=True)
+            # 用已耗时抵扣间隔，避免「间隔 + 刷新耗时」逐轮漂移。
+            elapsed = time.monotonic() - started
+            time.sleep(
+                max(1.0, config.MODEL_HYDRO_NODE_INDEX_REFRESH_SECONDS - elapsed)
+            )
+
+    threading.Thread(target=worker, name="hydro-node-index", daemon=True).start()
+
+
 def daemon_process(process_queue: queue.Queue[any]):
     print("Daemon process is working", flush=True)
+    # 字典预取线程：case 子进程读文件替代建连查库。
+    _start_hydro_node_index_refresher()
 
     # task_queue 记录「已占用的执行槽位」。daemon 目前单线程，这把锁是零争用的；
     # 但槽位判断是典型的 check-then-act，将来派发改并发时这层互斥必须已经在。

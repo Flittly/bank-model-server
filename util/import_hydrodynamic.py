@@ -428,6 +428,24 @@ def list_imported_hydrodynamic_data():
     print(f"\n总计: {len(points)} 个坐标点")
 
 
+def _refresh_node_index() -> None:
+    """导入结束后主动刷新水动力节点字典（D2）。
+
+    不等 daemon 的 60s 兜底：导入是有明确边界的运维动作，刷完新档位立刻可见。
+    刷新失败不算导入失败 —— 数据已经在库里，最坏等一个兜底周期。
+    """
+    try:
+        from util import hydro_node_index
+
+        if hydro_node_index.refresh_now():
+            print("  ✓ 已刷新水动力节点字典")
+        else:
+            print("  ⚠ 水动力节点字典未刷新，最多 60s 后由 daemon 兜底")
+    except Exception as error:
+        print(f"  ⚠ 水动力节点字典刷新异常（不影响导入结果）: {error}")
+
+
 if __name__ == "__main__":
     import_hydrodynamic_data()
     list_imported_hydrodynamic_data()
+    _refresh_node_index()

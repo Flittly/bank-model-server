@@ -350,6 +350,23 @@ def _scan_range(frames: list[Path], limit_points: int) -> str:
     )
 
 
+def _refresh_node_index() -> None:
+    """导入结束后主动刷新水动力节点字典（D2）。
+
+    不等 daemon 的 60s 兜底：导入是有明确边界的运维动作，刷完新档位立刻可见。
+    刷新失败不算导入失败 —— 数据已经在库里，最坏等一个兜底周期。
+    """
+    try:
+        from util import hydro_node_index
+
+        if hydro_node_index.refresh_now():
+            print("  ✓ 已刷新水动力节点字典")
+        else:
+            print("  ⚠ 水动力节点字典未刷新，最多 60s 后由 daemon 兜底")
+    except Exception as error:
+        print(f"  ⚠ 水动力节点字典刷新异常（不影响导入结果）: {error}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="1998 大洪水水动力数据导入")
     ap.add_argument("--domain", default=DEFAULT_DOMAIN, help=f"数据集域（默认 {DEFAULT_DOMAIN}）")
@@ -430,6 +447,10 @@ def main() -> int:
             )
         else:
             print(f"  ✗ {r['tidal_level']:<12} 失败")
+    # 只在真写入过数据时刷新字典：全 dry_run 的预演不该产生任何副作用。
+    if any(r.get("ok") and not r.get("dry_run") for r in results):
+        _refresh_node_index()
+
     print(f"\n  成功 {ok}/{len(results)}，总耗时 {time.time() - t_all:.1f}s")
     return 0 if ok == len(results) else 1
 

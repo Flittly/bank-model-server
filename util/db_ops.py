@@ -7,6 +7,7 @@ import json
 from typing import List, Dict, Any, Optional, Tuple
 
 from util import db
+from util import hydro_node_index
 
 # 默认数据集域（dataset_domain）：全江段水动力数据的兜底域。
 # 断面 bench_segment（NJ/YZ/Yangtze）直查落空时，模型统一回退到此域再查。
@@ -398,7 +399,16 @@ def get_available_hydrodynamic_nodes(
 ) -> List[int]:
     """
     Get available non-temp hydrodynamic water_qs nodes for a given tidal level.
+
+    先查 daemon 预取的进程外字典（见 docs/model-db-p0-design.md D2）：命中就直接
+    返回，一个连接都不建（这一句是 Windows 上 60ms 的固定成本）。以下任一情况
+    都回落下面的原 SQL，行为与没有字典时逐字相同：字典未覆盖该 key / 文件缺失 /
+    过期 / 损坏 / 版本不符 / 开关关闭。
     """
+    loaded, cached = hydro_node_index.lookup(dataset_domain, set_name, tidal_level)
+    if loaded:
+        return cached
+
     with db.get_db_cursor(dict_cursor=True) as (conn, cursor):
         cursor.execute(
             """

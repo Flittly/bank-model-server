@@ -283,3 +283,28 @@ RUSTFS_SECURE = _env_flag("RUSTFS_SECURE", False)
 
 # 地形数据缓存目录
 DIR_TERRAIN_CACHE = os.path.join(DIR_ROOT, "cache", "terrain")
+
+# ---------------------------------------------------------------------------
+# 水动力节点字典（D2，见 docs/model-db-p0-design.md）
+#
+# get_available_hydrodynamic_nodes 的答案全库只有 5 行（484,044 行的 DISTINCT），
+# 但每算一次要扫 8 万条索引条目，且每个 case 子进程还得新建一条 PG 连接（约 60ms）。
+# 这里由常驻 daemon 预取成 JSON 文件，case 读文件替代建连查库。
+# ---------------------------------------------------------------------------
+DIR_HYDRO_NODE_INDEX = os.path.join(
+    DIR_RESOURCE_JSON, "hydrodynamic_node_index.json"
+)
+
+# 总开关：设 0 直接回到纯 SQL 路径，回滚不需要改代码。
+MODEL_HYDRO_NODE_INDEX_ENABLED = _env_flag("MODEL_HYDRO_NODE_INDEX_ENABLED", True)
+
+# daemon 刷新间隔。数据是 append-only 的冷字典，60s 只为兜住「绕过脚本手工插库」。
+MODEL_HYDRO_NODE_INDEX_REFRESH_SECONDS = int(
+    os.getenv("MODEL_HYDRO_NODE_INDEX_REFRESH_SECONDS", "60")
+)
+
+# 缓存有效期。只用于「文件腐坏 / daemon 长期停摆」时自动回落 SQL，
+# 不参与数据新鲜度（新鲜度靠导入脚本收尾主动刷新）。取刷新间隔的 5 倍留余量。
+MODEL_HYDRO_NODE_INDEX_TTL_SECONDS = int(
+    os.getenv("MODEL_HYDRO_NODE_INDEX_TTL_SECONDS", "300")
+)
