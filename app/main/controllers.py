@@ -381,6 +381,10 @@ def register_tiff(
         max_y=bounds["max_y"],
         srid=bounds.get("srid", 3857),
     )
+    # 三维地形金字塔：上传后顺手排进后台切片队列。绝不抛异常 —— 地形切不了
+    # 不能让「上传」失败，那才是主链路。
+    from util.terrainService import on_dem_registered
+    on_dem_registered(tiff_key)
 
     return {
         "tiff_key": tiff_key,
@@ -417,6 +421,15 @@ def delete_tiff_resource(tiff_key: str) -> dict[str, Any]:
         print(f"[tiff-delete] file not found at: {local_path}", flush=True)
         raise FileNotFoundError(f"TIFF file not found: {local_path}")
 
+    # 三维地形金字塔是这份 DEM 的派生物，必须跟着源文件一起走。
+    # 行还在的时候先读指纹再删目录：等下面把行删了，就再也不知道目录叫什么了。
+    from util import terrainService
+    terrain_deleted = False
+    try:
+        terrain_deleted = terrainService.delete_terrain(tiff_key)
+    except Exception as exc:  # 删不掉只是占点磁盘，不能挡住删 DEM
+        print(f"[tiff-delete] 清理三维地形金字塔失败（已忽略）: {exc}", flush=True)
+
     parent_dir = os.path.dirname(local_path)
     if os.path.isdir(parent_dir) and not os.listdir(parent_dir):
         shutil.rmtree(parent_dir)
@@ -443,6 +456,7 @@ def delete_tiff_resource(tiff_key: str) -> dict[str, Any]:
     return {
         "tiff_key": tiff_key,
         "rustfs_deleted": rustfs_deleted,
+        "terrain_deleted": terrain_deleted,
         "deleted": True,
     }
 
@@ -490,14 +504,22 @@ def extract_tiff_bounds(tiff_key: str) -> dict[str, Any]:
     }
 
 
-def preview_dem(tiff_key: str, *, max_size: int | None = None) -> tuple[bytes, dict[str, Any]]:
-    """按 tiff_key 生成 DEM 预览图（灰度高程 + 红色 nodata）。
+def preview_dem(
+    tiff_key: str,
+    *,
+    max_size: int | None = None,
+    ramp: str | None = None,
+) -> tuple[bytes, dict[str, Any]]:
+    """按 tiff_key 生成 DEM 预览图（高程配色 + 红色 nodata）。
 
     与 :func:`extract_tiff_bounds` 用同一套 ``tiff_key → 路径`` 解析规则：``tiff_key`` 里
     第 1 段是河段、第 4 段是时间点，其余交给 :func:`util.rustfs.resolve_tiff_path`
     按候选路径查找（它同时支持本地目录与 RustFS 回源）。
+
+    Args:
+        ramp: 配色名（``gray`` / ``hypsometric``），空值用默认灰度。
     """
-    from model.demPreview import render_dem_preview
+    from model.demPreview import RAMP_GRAY, render_dem_preview
     from util.rustfs import resolve_tiff_path
 
     if not tiff_key:
@@ -508,6 +530,33 @@ def preview_dem(tiff_key: str, *, max_size: int | None = None) -> tuple[bytes, d
     timepoint = parts[4] if len(parts) > 4 else None
 
     tiff_path = resolve_tiff_path(tiff_key, segment=segment, timepoint=timepoint)
-    png_bytes, meta = render_dem_preview(tiff_path, max_size=max_size)
+    png_bytes, meta = render_dem_preview(tiff_path, max_size=max_size, ramp=(ramp or RAMP_GRAY))
     meta["tiff_key"] = tiff_key
     return png_bytes, meta
+
+
+def request_dem_terrain_build(tiff_key: str) -> dict[str, Any]:
+    """开始（或确认）某份 DEM 的三维地形切片，返回当前状态。"""
+    from util.terrainService import request_build
+
+    if not tiff_key:
+        raise ValueError("tiff_key 不能为空")
+    return request_build(tiff_key)
+
+
+def dem_terrain_status(tiff_key: str) -> dict[str, Any]:
+    """某份 DEM 的三维地形状态（顺手做过期检查）。"""
+    from util.terrainService import get_status
+
+    if not tiff_key:
+        raise ValueError("tiff_key 不能为空")
+    return get_status(tiff_key)
+
+
+def dem_terrain_tile_file(tiff_key: str, fingerprint: str, zoom: int, x: int, y: int):
+    """某张地形瓦片的本地路径；拿不到返回 None（调用方回 404）。"""
+    from util.terrainService import tile_file
+
+    if not tiff_key:
+        raise ValueError("tiff_key 不能为空")
+    return tile_file(tiff_key, fingerprint, zoom, x, y)

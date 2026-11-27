@@ -109,6 +109,16 @@ CREATE INDEX IF NOT EXISTS idx_tiff_bounds_key ON tiff_bounds(tiff_key);
 CREATE INDEX IF NOT EXISTS idx_tiff_bounds_region ON tiff_bounds(region_code);
 CREATE INDEX IF NOT EXISTS idx_tiff_bounds_geom ON tiff_bounds USING GIST(geom);
 
+-- tiff_bounds 的三维地形状态（util/terrainService.py；切片产物在 resource/tiles/dem/<指纹>/）
+ALTER TABLE tiff_bounds ADD COLUMN IF NOT EXISTS terrain_status VARCHAR(20);
+ALTER TABLE tiff_bounds ADD COLUMN IF NOT EXISTS terrain_fp VARCHAR(16);
+ALTER TABLE tiff_bounds ADD COLUMN IF NOT EXISTS terrain_minzoom INTEGER;
+ALTER TABLE tiff_bounds ADD COLUMN IF NOT EXISTS terrain_maxzoom INTEGER;
+ALTER TABLE tiff_bounds ADD COLUMN IF NOT EXISTS terrain_bounds JSONB;
+ALTER TABLE tiff_bounds ADD COLUMN IF NOT EXISTS terrain_tile_count INTEGER;
+ALTER TABLE tiff_bounds ADD COLUMN IF NOT EXISTS terrain_error TEXT;
+ALTER TABLE tiff_bounds ADD COLUMN IF NOT EXISTS terrain_generated_at TIMESTAMP;
+
 -- 添加 banks 表的 reversed 字段
 ALTER TABLE banks
 ADD COLUMN IF NOT EXISTS reversed BOOLEAN DEFAULT FALSE;

@@ -445,7 +445,18 @@ CREATE TABLE IF NOT EXISTS tiff_bounds (
     max_x NUMERIC NOT NULL,
     max_y NUMERIC NOT NULL,
     geom GEOMETRY(Polygon, 4326),  -- 边界多边形
-    
+
+    -- 三维地形（Mapbox terrain 的 Terrarium 瓦片金字塔，产物在 resource/tiles/dem/<指纹>/）
+    -- 状态：pending / building / ready / failed；NULL = 从未切过
+    terrain_status VARCHAR(20),
+    terrain_fp VARCHAR(16),              -- 金字塔指纹，同时是目录名与瓦片 URL 的一部分
+    terrain_minzoom INTEGER,
+    terrain_maxzoom INTEGER,
+    terrain_bounds JSONB,                -- 瓦片覆盖范围 {west,south,east,north}（4326）
+    terrain_tile_count INTEGER,
+    terrain_error TEXT,
+    terrain_generated_at TIMESTAMP,
+
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

@@ -46,6 +46,14 @@ def initialize_work_space():
 
     start_case_watchdog()
 
+    # DEM 三维地形：补表列、恢复待切队列、起后台切片线程。
+    # 放在最后 —— 它只是锦上添花，任何一步失败都只是三维地形不可用，不影响启动。
+    try:
+        from util.terrainService import start_worker
+        start_worker()
+    except Exception as exc:
+        print(f"[dem-terrain] 后台切片启动失败（已忽略，三维地形不可用）: {exc}", flush=True)
+
 
 def start_case_watchdog():
     """常驻巡检：服务不重启时，也能救回 `LOCK|RUNNING` 的半死 case。

@@ -449,14 +449,15 @@ def _header_number(value: Any, digits: int = 8) -> str:
 async def dem_preview_api(
     tiff_key: str = Query(..., description="DEM 的 tiff 资源键"),
     max_size: int = Query(0, description="输出长边像素上限，0 = 用服务端默认值"),
+    ramp: str = Query("gray", description="配色：gray（灰度高程）/ hypsometric（分层设色）"),
 ) -> Response:
-    """DEM 栅格预览：有效高程按灰度渲染，nodata/-9999 渲染为纯红。
+    """DEM 栅格预览：按 ``ramp`` 渲染高程，nodata/-9999 渲染为纯红。
 
     返回 PNG 本体；地理范围与色标信息放 ``X-Dem-*`` 响应头，调用方
-    （Java 网关 → 前端）不用再查一次边界接口就能把图贴到正确位置。
+    （Java 网关 → 前端）不用再查一次边界接口就能把图贴到正确位置、画出图例。
     """
     try:
-        png_bytes, meta = controllers.preview_dem(tiff_key, max_size=max_size or None)
+        png_bytes, meta = controllers.preview_dem(tiff_key, max_size=max_size or None, ramp=ramp)
     except FileNotFoundError as exc:
         raise handle_not_found(exc) from exc
     except ValueError as exc:
@@ -477,10 +478,56 @@ async def dem_preview_api(
         "X-Dem-High": _header_number(meta.get("high"), 3),
         "X-Dem-Nodata": _header_number(meta.get("nodata"), 3),
         "X-Dem-Nodata-Ratio": _header_number(meta.get("nodata_ratio"), 4),
-        # 同一份 DEM 的预览图不会变（缓存键含 mtime+size），让浏览器与网关都放手缓存
+        # 图例直接取自渲染用的断点表：前后端各写一份必然有一天对不上
+        "X-Dem-Ramp": str(meta.get("ramp") or "gray"),
+        "X-Dem-Legend": json.dumps(meta.get("legend_stops") or [], separators=(",", ":")),
+        # 同一份 DEM 的同一配色不会变（缓存键含 mtime+size+ramp），让浏览器与网关都放手缓存
         "Cache-Control": "public, max-age=3600",
     }
     return Response(content=png_bytes, media_type="image/png", headers=headers)
+
+
+# ---- DEM 三维地形（Mapbox terrain 的 Terrarium 瓦片） ----
+
+@api_router.post("/v0/dem/terrain/build")
+async def dem_terrain_build_api(tiff_key: str = Query(..., description="DEM 的 tiff 资源键")) -> dict[str, Any]:
+    """开始切片。幂等：已就绪且未过期时什么都不做。"""
+    try:
+        return controllers.request_dem_terrain_build(tiff_key)
+    except FileNotFoundError as exc:
+        raise handle_not_found(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@api_router.get("/v0/dem/terrain/status")
+async def dem_terrain_status_api(tiff_key: str = Query(..., description="DEM 的 tiff 资源键")) -> dict[str, Any]:
+    """切片状态。源文件被替换 / 金字塔被删时，这次调用会顺手把状态打回 pending。"""
+    try:
+        return controllers.dem_terrain_status(tiff_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@api_router.get("/v0/dem/terrain/tile")
+async def dem_terrain_tile_api(
+    tiff_key: str = Query(..., description="DEM 的 tiff 资源键"),
+    fp: str = Query(..., description="金字塔指纹（URL 长缓存的依据）"),
+    z: int = Query(..., ge=0, le=24),
+    x: int = Query(..., ge=0),
+    y: int = Query(..., ge=0),
+) -> Response:
+    """一张 Terrarium 瓦片。没有这张瓦片（走廊以外的空白区）就是 404，Mapbox 按 0 米处理。"""
+    path = controllers.dem_terrain_tile_file(tiff_key, fp, z, x, y)
+    if path is None:
+        raise HTTPException(status_code=404, detail="tile not found")
+    return FileResponse(path, media_type="image/png", headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
 
 @api_router.post("/api/v1/tiff/register")

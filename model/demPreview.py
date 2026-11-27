@@ -1,4 +1,4 @@
-"""DEM 栅格预览图：把单波段 DEM 渲染成「灰度高程 + 红色无效区」的 PNG。
+"""DEM 栅格预览图：把单波段 DEM 渲染成「高程配色 + 红色无效区」的 PNG。
 
 为什么要这个模块
 ----------------
@@ -8,9 +8,16 @@ DEM 的 nodata 上才报的 —— 一张预览图能让人在提交任务之前
 
 配色约定（与前端 ``demPreviewService.ts`` 的图例逐字对应，改这里必须同步改那边）
 ------------------------------------------------------------------------------
-- 有效高程：低 → 深黑 :data:`PREVIEW_DARK`，高 → 浅灰 :data:`PREVIEW_LIGHT`
+两种配色，由 ``ramp`` 参数选择：
+
+- ``gray``（默认）：有效高程 低 → 深黑 :data:`PREVIEW_DARK`，高 → 浅灰 :data:`PREVIEW_LIGHT`
   （用「低暗高亮」而不是纯黑白：浅色底图上的纯白会整片消失）
-- nodata / 非有限值：纯红 :data:`PREVIEW_NODATA`
+- ``hypsometric``：分层设色，按**绝对高程**从深蓝（河床）经浅蓝、米黄过渡到砖红（岸地）。
+  用绝对高程而不是按份数拉伸：不同 DEM 之间颜色可以横向对比，图例也能标真实高程。
+
+两档的 nodata 都是**透明**（输出 RGBA，见 :func:`_apply_nodata`）：这类河道 DEM 常有九成的
+矩形范围是空洞，涂实心红会把底图、地名和三维地形整片盖住。空洞照样一眼可见 —— 露出的是底图，
+图例写「无数据 · 透明」。整幅全空是唯一例外，仍返回不透明红（全透明 PNG 与「图没加载」无法区分）。
 
 为什么必须先 Warp 到 4326
 -------------------------
@@ -39,7 +46,7 @@ PREVIEW_MAX_SIZE = int(os.environ.get("DEM_PREVIEW_MAX_SIZE", "1536"))
 PREVIEW_DARK = 14
 PREVIEW_LIGHT = 208
 
-#: nodata 的颜色 —— 纯红，和灰度区对比最强。
+#: nodata 的颜色 —— 纯红，和两种配色区都能拉开对比。
 PREVIEW_NODATA = (230, 32, 32)
 
 #: 灰度拉伸用的分位数（低/高）。用分位而非真实 min/max：DEM 里常有单点异常值，
@@ -53,6 +60,52 @@ PERCENTILE_SAMPLE_CAP = 200_000
 #: 无 nodata 声明时的兜底哨兵值（与项目既有 ``-99999`` 约定一致）。
 FALLBACK_NODATA = -99999.0
 
+#: 配色名。前端图例按这里的字符串分支，**不要在别处硬编码**。
+RAMP_GRAY = "gray"
+RAMP_HYPSOMETRIC = "hypsometric"
+RAMPS = (RAMP_GRAY, RAMP_HYPSOMETRIC)
+
+#: 预览图的「画法版本」，进缓存键。**只要改了 colorize 的出图效果就必须 +1**：
+#: 缓存键原本只有「文件 mtime/大小 + 尺寸 + 配色」，改配色算法（例如把分层设色的
+#: nodata 从纯红改成透明）不会改变键，用户会一直看到旧图 —— 实测踩过：图例已经写
+#: 「透明」，地图上仍是一整块红，排查半天以为是前端图层。
+PREVIEW_STYLE_VERSION = 3
+
+#: 分层设色的断点（米, 颜色）。断点写**绝对高程**并按米递增：
+#: 长江下游 1998–2023 实测 −57.5 ~ 9.1 m、闽江支流 −47 ~ 13.6 m，两侧都留足余量。
+#: 蓝色由深到浅表示河床抬升，米黄是滩地/零高程附近，橙红到砖红是岸堤。
+HYPSOMETRIC_STOPS: tuple[tuple[float, str], ...] = (
+    (-80.0, "#08306b"),
+    (-60.0, "#1d5fa8"),
+    (-40.0, "#3f8fc4"),
+    (-20.0, "#78b4d8"),
+    (-5.0, "#a9d3e6"),
+    (0.0, "#e6f4f8"),
+    (2.0, "#f7f7c8"),
+    (5.0, "#fdd08a"),
+    (8.0, "#f08a5d"),
+    (12.0, "#d9483b"),
+    (20.0, "#9e1c26"),
+)
+
+
+def _hex_to_rgb(value: str) -> tuple[int, int, int]:
+    """``#rrggbb`` → ``(r, g, b)``。"""
+    text = value.lstrip("#")
+    if len(text) != 6:
+        raise ValueError(f"颜色写法不对：{value}")
+    return int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16)
+
+
+def ramp_stops(ramp: str) -> list[list[Any]]:
+    """配色的断点表，``[[高程, "#rrggbb"], ...]``；灰度配色没有断点。
+
+    给前端画图例用（随 ``X-Dem-Legend`` 响应头返回），避免前后端各写一份色值。
+    """
+    if ramp == RAMP_HYPSOMETRIC:
+        return [[float(metres), color] for metres, color in HYPSOMETRIC_STOPS]
+    return []
+
 
 def cache_dir() -> Path:
     """预览图缓存目录：``resource/cache/dem_preview``。"""
@@ -64,17 +117,20 @@ def cache_dir() -> Path:
     return target
 
 
-def _cache_key(path: Path, max_size: int) -> str:
-    """按「绝对路径 + 修改时间 + 文件大小 + 尺寸上限」做键。
+def _cache_key(path: Path, max_size: int, ramp: str) -> str:
+    """按「绝对路径 + 修改时间 + 文件大小 + 尺寸上限 + 配色 + 画法版本」做键。
 
     mtime/size 必须进键里：同名 tif 被替换后如果仍命中旧缓存，用户看到的会是
-    上一份 DEM 的图，而这种错配极难从界面上发现。
+    上一份 DEM 的图，而这种错配极难从界面上发现。ramp 也必须进键：漏了它切配色
+    会命中同一张 PNG，界面上表现为「点了没反应」。``PREVIEW_STYLE_VERSION``
+    保证改了画法（颜色/透明度）之后不会继续命旧图。
     """
     try:
         stat = path.stat()
-        fingerprint = f"{path.resolve()}|{stat.st_mtime_ns}|{stat.st_size}|{max_size}"
+        fingerprint = (f"v{PREVIEW_STYLE_VERSION}|{path.resolve()}|{stat.st_mtime_ns}|"
+                       f"{stat.st_size}|{max_size}|{ramp}")
     except OSError:
-        fingerprint = f"{path}|?|?|{max_size}"
+        fingerprint = f"v{PREVIEW_STYLE_VERSION}|{path}|?|?|{max_size}|{ramp}"
     return hashlib.md5(fingerprint.encode("utf-8")).hexdigest()[:20]
 
 
@@ -88,19 +144,61 @@ def _sample_percentile(values: np.ndarray, q: float) -> float:
     return float(np.percentile(values, q))
 
 
-def colorize(dem: np.ndarray, nodata: float | None) -> tuple[np.ndarray, dict[str, Any]]:
-    """把单波段高程数组转成 ``(H, W, 3)`` 的 uint8 RGB 图。
+def _hypsometric_rgb(elevation: np.ndarray) -> np.ndarray:
+    """按绝对高程做分层设色（线性插值断点），返回 ``(H, W, 3)`` uint8。
+
+    ``np.interp`` 对超出断点范围的值取端点色，所以低于 −80 m 或高于 20 m 不会出现
+    黑边或反色；无效像素由调用方覆盖成红色。
+    """
+    positions = np.array([metres for metres, _ in HYPSOMETRIC_STOPS], dtype=np.float32)
+    colors = np.array([_hex_to_rgb(color) for _, color in HYPSOMETRIC_STOPS], dtype=np.float32)
+    out = np.empty(elevation.shape + (3,), dtype=np.uint8)
+    for channel in range(3):
+        scaled = np.interp(elevation, positions, colors[:, channel])
+        out[..., channel] = np.clip(scaled, 0.0, 255.0).astype(np.uint8)
+    return out
+
+
+def _apply_nodata(rgb: np.ndarray, invalid: np.ndarray) -> np.ndarray:
+    """把无效像素涂成透明，返回 RGBA。
+
+    两档都透明，理由是被实测说服的：这类河道 DEM 有 **九成**的矩形范围是 nodata，
+    涂实心红会把底图、地名、三维地形整片盖掉（灰度档尤其明显 —— 三维一打开就是一整块
+    红板子）。透明后空洞照样一眼可见：那里露出的是底图，而图例写明「无数据 · 透明」。
+
+    RGB 侧仍写上 :data:`PREVIEW_NODATA`：万一有人按通道读图（或 alpha 被忽略），
+    也能认出这是空洞而不是某个高程色。分层设色档的顶端本来就是砖红，靠颜色区分不了，
+    只能靠 alpha。
+    """
+    out = rgb.copy()
+    out[invalid] = PREVIEW_NODATA
+    alpha = np.where(invalid, 0, 255).astype(np.uint8)
+    return np.dstack([out, alpha])
+
+
+def colorize(
+    dem: np.ndarray,
+    nodata: float | None,
+    ramp: str = RAMP_GRAY,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """把单波段高程数组转成 uint8 图：灰度/分层设色都是 ``(H, W, 3)`` RGB，
+    分层设色档因为要标透明，返回的是 ``(H, W, 4)`` RGBA。
 
     纯函数（不碰 GDAL / 文件），便于单测直接喂构造数组。
 
     Args:
         dem: 二维高程数组，行序与图像一致（第 0 行是北边）。
         nodata: 哨兵值，``None`` 表示只按非有限值判定无效。
+        ramp: :data:`RAMP_GRAY` 或 :data:`RAMP_HYPSOMETRIC`。
 
     Returns:
         ``(rgb, stats)``；``stats`` 里 ``min``/``max`` 是真实有效高程极值（图例用），
-        ``low``/``high`` 是实际用于拉伸的灰度端点。
+        ``low``/``high`` 是「有效高程的 2%/98% 分位」（灰度配色拿它做拉伸端点，
+        分层设色只作参考）。
     """
+    if ramp not in RAMPS:
+        raise ValueError(f"不支持的配色：{ramp}（可选 {'/'.join(RAMPS)}）")
+
     arr = np.asarray(dem, dtype=np.float32)
 
     invalid = ~np.isfinite(arr)
@@ -115,7 +213,9 @@ def colorize(dem: np.ndarray, nodata: float | None) -> tuple[np.ndarray, dict[st
 
     valid = arr[~invalid]
     if valid.size == 0:
-        # 整个 DEM 都是空的（上传错文件 / 裁剪错范围）：整张红，语义上完全正确
+        # 整个 DEM 都是空的（上传错文件 / 裁剪错范围）：整张红，语义上完全正确。
+        # 这里**故意**不走 _apply_nodata：正常情况空洞是透明的，但「整张都空」时全透明
+        # PNG 看起来和「图没加载出来」一模一样，反而把信息吞掉了。
         rgb = np.empty(arr.shape + (3,), dtype=np.uint8)
         rgb[...] = PREVIEW_NODATA
         return rgb, {
@@ -135,13 +235,17 @@ def colorize(dem: np.ndarray, nodata: float | None) -> tuple[np.ndarray, dict[st
         high = low + 1.0
 
     # 先把无效像素替换成 0 再算归一化：NaN 直接参与乘加会在 astype(uint8) 时
-    # 触发 "invalid value encountered in cast"（结果虽然随后被红色覆盖，但会刷警告，
-    # 且依赖"后面一定覆盖"这种隐含约定，重构时极易漏掉）。
+    # 触发 "invalid value encountered in cast"（结果虽然随后会被 nodata 标记覆盖，
+    # 但会刷警告，且依赖"后面一定覆盖"这种隐含约定，重构时极易漏掉）。
     safe = np.where(invalid, 0.0, arr)
-    normalized = np.clip((safe - low) / (high - low), 0.0, 1.0)
-    gray = (PREVIEW_DARK + normalized * (PREVIEW_LIGHT - PREVIEW_DARK)).astype(np.uint8)
-    rgb = np.repeat(gray[:, :, None], 3, axis=2)
-    rgb[invalid] = PREVIEW_NODATA
+    if ramp == RAMP_HYPSOMETRIC:
+        rgb = _hypsometric_rgb(safe)
+    else:
+        normalized = np.clip((safe - low) / (high - low), 0.0, 1.0)
+        gray = (PREVIEW_DARK + normalized * (PREVIEW_LIGHT - PREVIEW_DARK)).astype(np.uint8)
+        rgb = np.repeat(gray[:, :, None], 3, axis=2)
+
+    rgb = _apply_nodata(rgb, invalid)
 
     return rgb, {
         "min": float(valid.min()),
@@ -156,6 +260,7 @@ def render_dem_preview(
     tiff_path: str | Path,
     *,
     max_size: int | None = None,
+    ramp: str = RAMP_GRAY,
     use_cache: bool = True,
 ) -> tuple[bytes, dict[str, Any]]:
     """生成 DEM 预览 PNG。
@@ -163,17 +268,21 @@ def render_dem_preview(
     Args:
         tiff_path: DEM 文件路径。
         max_size: 输出长边像素上限，默认 :data:`PREVIEW_MAX_SIZE`。
+        ramp: 配色，:data:`RAMP_GRAY`（默认）或 :data:`RAMP_HYPSOMETRIC`。
         use_cache: 命中磁盘缓存时直接返回。
 
     Returns:
         ``(png_bytes, meta)``，``meta`` 里的地理范围可直接当 Mapbox ``image`` source 的
-        ``coordinates`` 用。
+        ``coordinates`` 用；``ramp`` / ``legend_stops`` 给前端画图例。
 
     Raises:
         FileNotFoundError: 文件不存在。
-        ValueError: 文件打不开 / 单波段读取失败 / Warp 失败。
+        ValueError: 文件打不开 / 单波段读取失败 / Warp 失败 / 配色名不认识。
     """
     from osgeo import gdal  # 延迟 import：只有真正预览时才拉起 GDAL
+
+    if ramp not in RAMPS:
+        raise ValueError(f"不支持的配色：{ramp}（可选 {'/'.join(RAMPS)}）")
 
     gdal.UseExceptions()
 
@@ -182,7 +291,7 @@ def render_dem_preview(
         raise FileNotFoundError(f"DEM 文件不存在：{path}")
 
     size = int(max_size or PREVIEW_MAX_SIZE)
-    key = _cache_key(path, size)
+    key = _cache_key(path, size, ramp)
     png_file = cache_dir() / f"{key}.png"
     meta_file = cache_dir() / f"{key}.json"
 
@@ -250,13 +359,16 @@ def render_dem_preview(
                 raise ValueError(f"DEM 读取失败：{path}")
             arr = np.asarray(arr, dtype=np.float32)
 
-            rgb, stats = colorize(arr, dst_nodata)
+            rgb, stats = colorize(arr, dst_nodata, ramp)
 
             from PIL import Image
 
             buffer = io.BytesIO()
+            # 分层设色档带 alpha（nodata 透明），必须按通道数选 mode：
+            # 硬写 "RGB" 会让 PIL 把 RGBA 数组当三通道解析（要么报错，要么把 alpha 当垃圾通道）。
+            mode = "RGBA" if rgb.shape[2] == 4 else "RGB"
             # 不加 optimize：2.4 MP 的 PNG 上 optimize 会多花数百毫秒，压缩率收益不到 10%
-            Image.fromarray(rgb, "RGB").save(buffer, format="PNG")
+            Image.fromarray(rgb, mode).save(buffer, format="PNG")
             png_bytes = buffer.getvalue()
 
             geo = warped.GetGeoTransform()
@@ -280,6 +392,8 @@ def render_dem_preview(
                 "low": stats["low"],
                 "high": stats["high"],
                 "nodata_ratio": stats["nodata_ratio"],
+                "ramp": ramp,
+                "legend_stops": ramp_stops(ramp),
                 "cached": False,
             }
         finally:
